@@ -2,7 +2,7 @@
  * Copyright (c) 2022 Andreas Sandberg
  * Copyright (c) 2018-2020 PHYTEC Messtechnik GmbH
  * Copyright 2024 NXP
- * Copyright (c) 2026, Dominic Hanssen (neutrondom@gmail.com)
+ * Copyright (c) 2026, Dominic Hanssen
  *
  * SPDX-License-Identifier: Apache-2.0
  */

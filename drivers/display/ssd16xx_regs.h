@@ -2,7 +2,7 @@
 
 /*
  * Copyright (c) 2018 PHYTEC Messtechnik GmbH
- * Copyright (c) 2026 Dominic Hanssen (neutrondom@gmail.com)
+ * Copyright (c) 2026 Dominic Hanssen
  *
  * SPDX-License-Identifier: Apache-2.0
  */
