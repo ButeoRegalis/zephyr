@@ -68,6 +68,9 @@ Current supported displays
 | Good Display | FPC-A002        | SSD1680 /    | waveshare_epaper_gdey0213b74 |
 | GDEY0213B74  |                 | ssd16xx      |                              |
 +--------------+-----------------+--------------+------------------------------+
+| Good Display | FPC-E004        | SSD1683 /    | waveshare_epaper_gdey0579z93 |
+| GDEY0579Z93  |                 | ssd16xx      |                              |
++--------------+-----------------+--------------+------------------------------+
 
 
 Requirements

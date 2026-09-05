@@ -46,3 +46,9 @@ shields:
     vendor: waveshare
     supported_features:
       - display
+
+  - name: waveshare_epaper_gdey0579z93
+    full_name: WAVESHARE e-Paper GDEY0579Z93
+    vendor: waveshare
+    supported_features:
+      - display

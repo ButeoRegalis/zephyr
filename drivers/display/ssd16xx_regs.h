@@ -2,6 +2,7 @@
 
 /*
  * Copyright (c) 2018 PHYTEC Messtechnik GmbH
+ * Copyright (c) 2026 Dominic Hanssen (neutrondom@protonmail.com)
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -46,6 +47,13 @@
 #define SSD16XX_CMD_RAM_YPOS_CTRL		0x45
 #define SSD16XX_CMD_RAM_XPOS_CNTR		0x4e
 #define SSD16XX_CMD_RAM_YPOS_CNTR		0x4f
+#define SSD16XX_CMD_CASCADE_SELECT      0x91
+#define SSD16XX_CMD_CASCADE_WRITE_RAM   0xA4
+#define SSD16XX_CMD_CASCADE_WRITE_RED_RAM   0xA6
+#define SSD16XX_CMD_CASCADE_RAM_XPOS_CTRL   0xC4
+#define SSD16XX_CMD_CASCADE_RAM_YPOS_CTRL   0xC5
+#define SSD16XX_CMD_CASCADE_RAM_XPOS_CNTR   0xCe
+#define SSD16XX_CMD_CASCADE_RAM_YPOS_CNTR   0xCf
 
 /* Data entry sequence modes */
 #define SSD16XX_DATA_ENTRY_MASK			0x07

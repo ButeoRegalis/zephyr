@@ -2,6 +2,7 @@
  * Copyright (c) 2022 Andreas Sandberg
  * Copyright (c) 2018-2020 PHYTEC Messtechnik GmbH
  * Copyright 2024 NXP
+ * Copyright (c) 2026, Dominic Hanssen (neutrondom@protonmail.com)
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -31,7 +32,6 @@ LOG_MODULE_REGISTER(ssd16xx);
 #define SSD16XX_PIXELS_PER_BYTE		8
 #define SSD16XX_DEFAULT_TR_VALUE	25U
 #define SSD16XX_TR_SCALE_FACTOR		256U
-
 
 enum ssd16xx_profile_type {
 	SSD16XX_PROFILE_FULL = 0,
@@ -136,6 +136,72 @@ static inline int ssd16xx_write_cmd(const struct device *dev, uint8_t cmd,
 	return err;
 }
 
+#if CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1
+static int ssd16xx_write_cascade(const struct device *dev,
+								const struct display_buffer_descriptor *desc,
+								const void *buf)
+{
+	const struct ssd16xx_config *config = dev->config;
+	const struct ssd16xx_data *data = dev->data;
+	const uint16_t cs_bytes = config->quirks->max_height / SSD16XX_PIXELS_PER_BYTE;
+	const uint16_t row_bytes = config->height / SSD16XX_PIXELS_PER_BYTE;
+	const uint8_t *byte_buf = (const uint8_t *)buf;
+	struct display_buffer_descriptor row_desc = { .buf_size = cs_bytes };
+	const uint16_t num_rows = desc->width;
+	int err;
+
+	if (data->orientation != DISPLAY_ORIENTATION_NORMAL &&
+	    data->orientation != DISPLAY_ORIENTATION_ROTATED_180) {
+		/*
+		 * The cascade buffer layout below assumes rows are laid out
+		 * along desc->width, which holds for NORMAL/ROTATED_180 but
+		 * hasn't been verified against real hardware for the rotated
+		 * orientations.
+		 */
+		LOG_ERR("Rotated orientations are not supported with cascaded chips");
+		return -ENOTSUP;
+	}
+
+	/* Chip 1: B/W RAM (0x24), bytes 0..(cs_bytes-1) of each row */
+	ssd16xx_busy_wait(dev);
+	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
+								SSD16XX_CMD_WRITE_RAM, NULL, 0);
+	if (err < 0) {
+		return err;
+	}
+
+	for (uint16_t j = 0; j < num_rows; j++) {
+		err = mipi_dbi_write_display(config->mipi_dev, &config->dbi_config,
+									byte_buf + j * row_bytes, &row_desc,
+									PIXEL_FORMAT_MONO10);
+		if (err < 0) {
+			return err;
+		}
+	}
+	mipi_dbi_release(config->mipi_dev, &config->dbi_config);
+
+	/* Chip 2: B/W RAM (0xA4), bytes (cs_bytes-1)..(row_bytes-1) of each row */
+	ssd16xx_busy_wait(dev);
+	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
+								SSD16XX_CMD_CASCADE_WRITE_RAM, NULL, 0);
+	if (err < 0) {
+		return err;
+	}
+
+	for (uint16_t j = 0; j < num_rows; j++) {
+		err = mipi_dbi_write_display(config->mipi_dev, &config->dbi_config,
+									byte_buf + j * row_bytes + (cs_bytes - 1),
+									&row_desc, PIXEL_FORMAT_MONO10);
+		if (err < 0) {
+			return err;
+		}
+	}
+	mipi_dbi_release(config->mipi_dev, &config->dbi_config);
+
+	return 0;
+}
+#endif /* CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1 */
+
 static inline int ssd16xx_write_uint8(const struct device *dev, uint8_t cmd,
 				      uint8_t data)
 {
@@ -198,11 +264,9 @@ static inline size_t push_y_param(const struct device *dev,
 	return 0;
 }
 
-
-
 static inline int ssd16xx_set_ram_param(const struct device *dev,
-					uint16_t sx, uint16_t ex,
-					uint16_t sy, uint16_t ey)
+										uint16_t sx, uint16_t ex,
+										uint16_t sy, uint16_t ey)
 {
 	int err;
 	uint8_t tmp[4];
@@ -225,8 +289,8 @@ static inline int ssd16xx_set_ram_param(const struct device *dev,
 	return 0;
 }
 
-static inline int ssd16xx_set_ram_ptr(const struct device *dev, uint16_t x,
-				      uint16_t y)
+static inline int ssd16xx_set_ram_ptr(const struct device *dev,
+									uint16_t x,	uint16_t y)
 {
 	int err;
 	uint8_t tmp[2];
@@ -241,6 +305,52 @@ static inline int ssd16xx_set_ram_ptr(const struct device *dev, uint16_t x,
 	len = push_y_param(dev, tmp, y);
 	return ssd16xx_write_cmd(dev, SSD16XX_CMD_RAM_YPOS_CNTR, tmp, len);
 }
+
+#if CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1
+static int ssd16xx_set_cascade_ram_param(const struct device *dev,
+										uint16_t sx, uint16_t ex,
+										uint16_t sy, uint16_t ey)
+{
+	int err;
+	uint8_t select = 0x00;
+	uint8_t tmp[4];
+	size_t len;
+
+	err = ssd16xx_write_cmd(dev, SSD16XX_CMD_CASCADE_SELECT, &select, 1);
+	if (err < 0) {
+		return err;
+	}
+
+	/* X range is reversed for chip 2 */
+	len  = push_x_param(dev, tmp, ex);
+	len += push_x_param(dev, tmp + len, sx);
+	err = ssd16xx_write_cmd(dev, SSD16XX_CMD_CASCADE_RAM_XPOS_CTRL, tmp, len);
+	if (err < 0) {
+		return err;
+	}
+
+	len  = push_y_param(dev, tmp, sy);
+	len += push_y_param(dev, tmp + len, ey);
+	return ssd16xx_write_cmd(dev, SSD16XX_CMD_CASCADE_RAM_YPOS_CTRL, tmp, len);
+}
+
+static int ssd16xx_set_cascade_ram_ptr(const struct device *dev,
+										uint16_t x, uint16_t y)
+{
+	int err;
+	uint8_t tmp[2];
+	size_t len;
+
+	len = push_x_param(dev, tmp, x);
+	err = ssd16xx_write_cmd(dev, SSD16XX_CMD_CASCADE_RAM_XPOS_CNTR, tmp, len);
+	if (err < 0) {
+		return err;
+	}
+
+	len = push_y_param(dev, tmp, y);
+	return ssd16xx_write_cmd(dev, SSD16XX_CMD_CASCADE_RAM_YPOS_CNTR, tmp, len);
+}
+#endif /* CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1 */
 
 static int ssd16xx_activate(const struct device *dev, uint8_t ctrl2)
 {
@@ -398,6 +508,60 @@ static int ssd16xx_set_window(const struct device *dev,
 		return -EINVAL;
 	}
 
+#if CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1
+	if (true) {
+		const uint16_t cs_bytes = config->quirks->max_height / SSD16XX_PIXELS_PER_BYTE;
+		uint16_t chip1_sx, chip1_ex;
+		uint16_t cascade_y_start, cascade_y_end;
+
+		/*
+		 * Chip 1's byte-address direction and the shared gate-line
+		 * direction are matched to the vendor reference driver here:
+		 * for NORMAL, chip 1 addresses ascending (0..cs_bytes-1) while
+		 * the gate axis addresses descending (last gate..0). Chip 2
+		 * (below) always addresses descending, matching the reference
+		 * regardless of orientation.
+		 */
+		if (x_start >= x_end) {
+			/* Descending: NORMAL, ROTATED_90 */
+			chip1_sx = 0;
+			chip1_ex = cs_bytes - 1;
+			cascade_y_start = y_end;
+			cascade_y_end = y_start;
+		} else {
+			/* Ascending: ROTATED_180, ROTATED_270 */
+			chip1_sx = cs_bytes - 1;
+			chip1_ex = 0;
+			cascade_y_start = y_start;
+			cascade_y_end = y_end;
+		}
+
+		err = ssd16xx_set_ram_param(dev, chip1_sx, chip1_ex,
+					    cascade_y_start, cascade_y_end);
+		if (err < 0) {
+			return err;
+		}
+
+		err = ssd16xx_set_ram_ptr(dev, chip1_sx, cascade_y_start);
+		if (err < 0) {
+			return err;
+		}
+
+		err = ssd16xx_set_cascade_ram_param(dev, 0, cs_bytes - 1,
+						    cascade_y_start, cascade_y_end);
+		if (err < 0) {
+			return err;
+		}
+
+		err = ssd16xx_set_cascade_ram_ptr(dev, cs_bytes - 1, cascade_y_start);
+		if (err < 0) {
+			return err;
+		}
+
+		return 0;
+	}
+#endif /* CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1 */
+
 	err = ssd16xx_set_ram_param(dev, x_start, x_end, y_start, y_end);
 	if (err < 0) {
 		return err;
@@ -422,7 +586,7 @@ static int ssd16xx_write(const struct device *dev, const uint16_t x,
 		config->profiles[SSD16XX_PROFILE_PARTIAL] != NULL;
 	const bool partial_refresh = !data->blanking_on && have_partial_refresh;
 	const size_t buf_len = MIN(desc->buf_size,
-				   desc->height * desc->width / 8);
+				   desc->height * desc->width / SSD16XX_PIXELS_PER_BYTE);
 	int err;
 
 	if (buf == NULL || buf_len == 0U) {
@@ -446,8 +610,12 @@ static int ssd16xx_write(const struct device *dev, const uint16_t x,
 		return err;
 	}
 
+#if CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1
+    err = ssd16xx_write_cascade(dev, desc, buf);
+#else
 	err = ssd16xx_write_cmd(dev, SSD16XX_CMD_WRITE_RAM, (uint8_t *)buf,
-				buf_len);
+			buf_len);
+#endif
 	if (err < 0) {
 		return err;
 	}
@@ -498,7 +666,7 @@ int ssd16xx_read_ram(const struct device *dev, enum ssd16xx_ram ram_type,
 {
 	const struct ssd16xx_data *data = dev->data;
 	const size_t buf_len = MIN(desc->buf_size,
-				   desc->height * desc->width / 8);
+				   desc->height * desc->width / SSD16XX_PIXELS_PER_BYTE);
 	int err;
 	uint8_t ram_ctrl;
 
@@ -592,11 +760,25 @@ static int ssd16xx_set_orientation(const struct device *dev,
 	int err;
 
 	if (orientation == DISPLAY_ORIENTATION_NORMAL) {
+#if CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1
+		/*
+		 * The cascade RAM write streams each row as one contiguous
+		 * chunk and relies on the controller auto-advancing along X
+		 * within the row, matching the vendor reference driver's
+		 * entry mode for this panel.
+		 */
+		data->scan_mode = SSD16XX_DATA_ENTRY_XIYDX;
+#else
 		data->scan_mode = SSD16XX_DATA_ENTRY_XDYIY;
+#endif
 	} else if (orientation == DISPLAY_ORIENTATION_ROTATED_90) {
 		data->scan_mode = SSD16XX_DATA_ENTRY_XDYDX;
 	} else if (orientation == DISPLAY_ORIENTATION_ROTATED_180) {
+#if CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1
+		data->scan_mode = SSD16XX_DATA_ENTRY_XDYDX;
+#else
 		data->scan_mode = SSD16XX_DATA_ENTRY_XIYDY;
+#endif
 	} else if (orientation == DISPLAY_ORIENTATION_ROTATED_270) {
 		data->scan_mode = SSD16XX_DATA_ENTRY_XIYIX;
 	}
@@ -633,18 +815,6 @@ static int ssd16xx_clear_cntlr_mem(const struct device *dev, uint8_t ram_cmd)
 		return err;
 	}
 
-	err = ssd16xx_set_ram_param(dev, SSD16XX_PANEL_FIRST_PAGE,
-				    panel_h - 1, last_gate,
-				    SSD16XX_PANEL_FIRST_GATE);
-	if (err < 0) {
-		return err;
-	}
-
-	err = ssd16xx_set_ram_ptr(dev, SSD16XX_PANEL_FIRST_PAGE, last_gate);
-	if (err < 0) {
-		return err;
-	}
-
 	if (config->profiles[SSD16XX_PROFILE_PARTIAL] == NULL
 		&& ram_cmd == SSD16XX_CMD_WRITE_RED_RAM) {
 		/* Display doesn't support partial refresh, so it either doesn't matter what is in
@@ -655,6 +825,84 @@ static int ssd16xx_clear_cntlr_mem(const struct device *dev, uint8_t ram_cmd)
 	} else {
 		memset(clear_page, 0xff, sizeof(clear_page));
 	}
+
+#if CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1
+	if (true) {
+		const uint16_t cs_bytes = config->quirks->max_height / SSD16XX_PIXELS_PER_BYTE;
+		uint8_t cs_ram_cmd = (ram_cmd == SSD16XX_CMD_WRITE_RAM)
+								? SSD16XX_CMD_CASCADE_WRITE_RAM
+								: SSD16XX_CMD_CASCADE_WRITE_RED_RAM;
+
+		/* Chip 1 */
+		err = ssd16xx_set_ram_param(dev, SSD16XX_PANEL_FIRST_PAGE,
+										cs_bytes - 1, last_gate,
+										SSD16XX_PANEL_FIRST_GATE);
+		if (err < 0) {
+			return err;
+		}
+
+		err = ssd16xx_set_ram_ptr(dev, SSD16XX_PANEL_FIRST_PAGE, last_gate);
+		if (err < 0) {
+			return err;
+		}
+
+		for (int h = 0; h < config->width; h++) {
+			size_t x = cs_bytes;
+
+			while (x) {
+				size_t l = MIN(x, sizeof(clear_page));
+
+				x -= l;
+				err = ssd16xx_write_cmd(dev, ram_cmd, clear_page, l);
+				if (err < 0) {
+					return err;
+				}
+			}
+		}
+
+		/* Chip 2 */
+		err = ssd16xx_set_cascade_ram_param(dev, SSD16XX_PANEL_FIRST_PAGE,
+												cs_bytes - 1, last_gate,
+												SSD16XX_PANEL_FIRST_GATE);
+		if (err < 0) {
+			return err;
+		}
+
+		err = ssd16xx_set_cascade_ram_ptr(dev, cs_bytes - 1, last_gate);
+		if (err < 0) {
+			return err;
+		}
+
+		for (int h = 0; h < config->width; h++) {
+			size_t x = cs_bytes;
+
+			while (x) {
+				size_t l = MIN(x, sizeof(clear_page));
+
+				x -= l;
+				err = ssd16xx_write_cmd(dev, cs_ram_cmd, clear_page, l);
+				if (err < 0) {
+					return err;
+				}
+			}
+		}
+
+		return 0;
+	}
+#endif /* CONFIG_SSD16XX_NUM_CASCADED_CHIPS > 1 */
+
+	err = ssd16xx_set_ram_param(dev, SSD16XX_PANEL_FIRST_PAGE,
+					panel_h - 1, last_gate,
+					SSD16XX_PANEL_FIRST_GATE);
+	if (err < 0) {
+		return err;
+	}
+
+	err = ssd16xx_set_ram_ptr(dev, SSD16XX_PANEL_FIRST_PAGE, last_gate);
+	if (err < 0) {
+		return err;
+	}
+
 	for (int h = 0; h < panel_h; h++) {
 		size_t x = config->width;
 
@@ -712,7 +960,6 @@ static inline int ssd16xx_load_ws_from_otp(const struct device *dev)
 
 	return 0;
 }
-
 
 static int ssd16xx_load_lut(const struct device *dev,
 			    const struct ssd16xx_dt_array *lut)
@@ -938,7 +1185,7 @@ static int ssd16xx_init(const struct device *dev)
 	}
 
 	if (config->width > config->quirks->max_width ||
-	    config->height > config->quirks->max_height) {
+		config->height > config->quirks->max_height * CONFIG_SSD16XX_NUM_CASCADED_CHIPS) {
 		LOG_ERR("Display size out of range.");
 		return -EINVAL;
 	}
@@ -1004,6 +1251,17 @@ static const struct ssd16xx_quirks quirks_solomon_ssd1680 = {
 static struct ssd16xx_quirks quirks_solomon_ssd1681 = {
 	.max_width = 200,
 	.max_height = 200,
+	.pp_width_bits = 8,
+	.pp_height_bits = 16,
+	.ctrl2_full = SSD16XX_GEN2_CTRL2_DISPLAY,
+	.ctrl2_partial = SSD16XX_GEN2_CTRL2_DISPLAY | SSD16XX_GEN2_CTRL2_MODE2,
+};
+#endif
+
+#if DT_HAS_COMPAT_STATUS_OKAY(solomon_ssd1683)
+static struct ssd16xx_quirks quirks_solomon_ssd1683 = {
+	.max_width = 300,
+	.max_height = 400,
 	.pp_width_bits = 8,
 	.pp_height_bits = 16,
 	.ctrl2_full = SSD16XX_GEN2_CTRL2_DISPLAY,
@@ -1102,3 +1360,5 @@ DT_FOREACH_STATUS_OKAY_VARGS(solomon_ssd1680, SSD16XX_DEFINE,
 			     &quirks_solomon_ssd1680);
 DT_FOREACH_STATUS_OKAY_VARGS(solomon_ssd1681, SSD16XX_DEFINE,
 			     &quirks_solomon_ssd1681);
+DT_FOREACH_STATUS_OKAY_VARGS(solomon_ssd1683, SSD16XX_DEFINE,
+				 &quirks_solomon_ssd1683);

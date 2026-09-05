@@ -5,7 +5,7 @@ title: Solomon SSD16XX EPD display controller
 
 description: |
     The Solomon SSD16XX is a monochrome / 3-colors E-Ink
-    controller with a maximum 176x296 resolution.
+    controller with a maximum 400x300 resolution.
 
 include: [mipi-dbi-spi-device.yaml, display-controller.yaml]
 
