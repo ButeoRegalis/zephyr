@@ -6,8 +6,8 @@
 #include "nrfx_gppi_sd2ppi_global.h"
 #include <ironside/se/api.h>
 
-static nrfx_atomic_t channels[NRFX_GPPI_NODE_COUNT];
-static nrfx_atomic_t group_channels[NRFX_GPPI_NODE_DPPI_COUNT];
+static nrfx_atomic_t channels[NRFX_GPPI_NODE_COUNT] __unused;
+static nrfx_atomic_t group_channels[NRFX_GPPI_NODE_DPPI_COUNT] __unused;
 static struct periphconf_entry write_entries[1];
 static size_t write_entries_count;
 
@@ -18,11 +18,12 @@ static size_t write_entries_count;
 	[NRFX_GPPI_NODE_PPIB##_id1##_##_id2] = {						\
 		.type = NRFX_GPPI_NODE_PPIB,							\
 		.domain_id = NRFX_GPPI_NODE_PPIB##_id1##_##_id2,				\
+		COND_CODE_1(CONFIG_NRFX_GPPI_EXT_ALLOCATOR, (), (	\
 		.ch_off = { PPIB_OFF(_id2), 0 },						\
 		.ppib = {									\
 			.p_channels = &channels[NRFX_GPPI_NODE_PPIB##_id1##_##_id2],		\
 			.p_reg = { PPIB_REG(_id1), PPIB_REG(_id2) }				\
-		}										\
+		}))										\
 	}
 
 /** @brief Conditionally create PPIB node.
@@ -420,8 +421,8 @@ static int actual_channel_mask(nrfx_gppi_node_id_t node_id, uint32_t *ch_mask, b
 		NRF_SPU133,
 		NRF_SPU134,
 		NRF_SPU135,
-		IF_ENABLED(NRFX_INSTANCE_PRESENT(SPU136), (NRF_SPU136,))
-		IF_ENABLED(NRFX_INSTANCE_PRESENT(SPU137), (NRF_SPU137,))
+		IF_ENABLED(DT_NODE_EXISTS(DT_NODELABEL(dppic135)), (NRF_SPU136,))
+		IF_ENABLED(DT_NODE_EXISTS(DT_NODELABEL(dppic136)), (NRF_SPU137,))
 		NRF_SPU122,
 	};
 	uint32_t out_mask = 0;
@@ -492,7 +493,9 @@ void nrfx_gppi_groups_init(nrfx_gppi_node_id_t node_id, uint32_t group_mask)
 		return;
 	}
 
+#if !defined(NRFX_GPPI_CONFIG_EXT_ALLOCATOR)
 	*nodes[node_id].dppi.p_group_channels = group_mask;
+#endif
 }
 
 int nrfx_gppi_ext_ppib_write(volatile uint32_t *p_addr, uint32_t value)

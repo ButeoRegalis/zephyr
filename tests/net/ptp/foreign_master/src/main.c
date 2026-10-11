@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
+ * Copyright (c) 2026 Philipp Steiner
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -102,6 +102,17 @@ static void set_host_timestamp_now(struct ptp_msg *msg)
 	msg->timestamp.host.nanosecond = now_ns % NSEC_PER_SEC;
 }
 
+static void set_local_uptime_now(struct ptp_msg *msg)
+{
+	msg->local_uptime_ms = k_uptime_get();
+}
+
+static void set_local_uptime_expired(struct ptp_msg *msg)
+{
+	msg->local_uptime_ms =
+		k_uptime_get() - (FOREIGN_TIME_TRANSMITTER_TIME_WINDOW_MUL * MSEC_PER_SEC);
+}
+
 static void set_host_timestamp_ns(struct ptp_msg *msg, int64_t timestamp_ns)
 {
 	msg->timestamp.host.second = timestamp_ns / NSEC_PER_SEC;
@@ -127,6 +138,7 @@ static void init_announce_msg_ext(struct ptp_msg *msg, uint8_t sender_id, uint16
 	set_clk_id(&msg->announce.gm_id, (uint8_t)(sender_id + 1));
 
 	set_host_timestamp_now(msg);
+	set_local_uptime_now(msg);
 }
 
 static void init_announce_msg(struct ptp_msg *msg, uint8_t sender_id, uint16_t sender_port,
@@ -490,6 +502,57 @@ ZTEST(ptp_foreign_master, test_best_foreign_cleanup_drops_expired_records)
 	zassert_not_null(foreign, "foreign clock missing");
 	zassert_equal(foreign->messages_count, 0, "expired records should be removed");
 	zassert_true(k_fifo_is_empty(&foreign->messages), "foreign message queue should be empty");
+}
+
+ZTEST(ptp_foreign_master, test_best_foreign_cleanup_uses_local_uptime)
+{
+	struct ptp_foreign_tt_clock *foreign;
+	const int64_t phc_timestamp_ns = 1777961133557564041LL;
+
+	init_announce_msg(&msg1, 0x68, 1, 120);
+	init_announce_msg(&msg2, 0x68, 1, 120);
+
+	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
+	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "second add failed");
+
+	set_host_timestamp_ns(&msg1, phc_timestamp_ns);
+	set_host_timestamp_ns(&msg2, phc_timestamp_ns + NSEC_PER_SEC);
+	set_local_uptime_expired(&msg1);
+	set_local_uptime_expired(&msg2);
+
+	zassert_is_null(ptp_port_best_foreign(&port), "expired records should not produce best");
+
+	foreign = find_foreign_clock(&port, 0x68, 1);
+	zassert_not_null(foreign, "foreign clock missing");
+	zassert_equal(foreign->messages_count, 0, "expired records should be removed");
+	zassert_true(k_fifo_is_empty(&foreign->messages), "foreign message queue should be empty");
+}
+
+ZTEST(ptp_foreign_master, test_best_foreign_cleanup_keeps_scaled_time_window)
+{
+	struct ptp_foreign_tt_clock *foreign;
+
+	/* log_msg_interval = 1 gives a 4 * 2^1 = 8 second time window.
+	 * Records aged 5 seconds must survive the cleanup. With 32-bit
+	 * arithmetic the window wraps to about 3.7 seconds and they are
+	 * dropped prematurely.
+	 */
+	init_announce_msg_ext(&msg1, 0x69, 1, 120, 128, 0, 1);
+	init_announce_msg_ext(&msg2, 0x69, 1, 120, 128, 0, 1);
+
+	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
+	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "second add failed");
+
+	msg1.local_uptime_ms = k_uptime_get() - (5 * MSEC_PER_SEC);
+	msg2.local_uptime_ms = k_uptime_get() - (5 * MSEC_PER_SEC);
+
+	zassert_not_null(ptp_port_best_foreign(&port),
+			 "records within the time window should produce best");
+
+	foreign = find_foreign_clock(&port, 0x69, 1);
+	zassert_not_null(foreign, "foreign clock missing");
+	zassert_equal(foreign->messages_count, FOREIGN_TIME_TRANSMITTER_THRESHOLD,
+		      "records within the time window should be kept");
 }
 
 ZTEST_SUITE(ptp_foreign_master, NULL, NULL, foreign_master_before, foreign_master_after, NULL);

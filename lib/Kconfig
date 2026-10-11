@@ -23,13 +23,13 @@ source "lib/os/Kconfig"
 
 source "lib/smf/Kconfig"
 
-source "lib/acpi/Kconfig"
-
 source "lib/runtime/Kconfig"
 
 source "lib/utils/Kconfig"
 
 source "lib/uuid/Kconfig"
+
+source "lib/word_granular_access/Kconfig"
 
 source "lib/min_heap/Kconfig"
 endmenu

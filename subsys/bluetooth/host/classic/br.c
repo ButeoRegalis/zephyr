@@ -11,11 +11,11 @@
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/buf.h>
 
-#include "common/bt_str.h"
+#include <common/bt_str.h>
 
-#include "host/hci_core.h"
-#include "host/conn_internal.h"
-#include "host/keys.h"
+#include <host/hci_core.h>
+#include <host/conn_internal.h>
+#include <host/keys.h>
 #include "br.h"
 #include "sco_internal.h"
 
@@ -742,7 +742,27 @@ void bt_hci_role_change(struct net_buf *buf)
 		}
 	}
 
-	bt_conn_role_changed(conn, evt->status);
+	bt_conn_br_role_changed(conn, evt->status);
+
+	bt_conn_unref(conn);
+}
+
+void bt_hci_conn_pkt_type_changed(struct net_buf *buf)
+{
+	struct bt_hci_evt_conn_pkt_type_changed *evt = (void *)buf->data;
+	uint16_t handle = sys_le16_to_cpu(evt->handle);
+	uint16_t packet_type = sys_le16_to_cpu(evt->packet_type);
+	struct bt_conn *conn;
+
+	LOG_DBG("status 0x%02x handle %u packet_type 0x%04x", evt->status, handle, packet_type);
+
+	conn = bt_conn_lookup_handle(handle, BT_CONN_TYPE_BR);
+	if (conn == NULL) {
+		LOG_ERR("Can't find conn for handle %u", handle);
+		return;
+	}
+
+	bt_conn_br_packet_type_changed(conn, evt->status, packet_type);
 
 	bt_conn_unref(conn);
 }
@@ -991,7 +1011,7 @@ int bt_br_init(void)
 
 	rp = (void *)rsp->data;
 	default_link_policy_settings = rp->default_link_policy_settings;
-	net_buf_unref(rsp);
+	net_buf_drop(&rsp);
 
 	bool should_enable = IS_ENABLED(CONFIG_BT_DEFAULT_ROLE_SWITCH_ENABLE);
 	bool is_enabled = (default_link_policy_settings &
@@ -1063,6 +1083,10 @@ int bt_br_discovery_start(const struct bt_br_discovery_param *param,
 	int err;
 
 	LOG_DBG("");
+
+	if (!atomic_test_bit(bt_dev.flags, BT_DEV_READY)) {
+		return -EAGAIN;
+	}
 
 	if (!valid_br_discov_param(param, cnt)) {
 		return -EINVAL;
@@ -1171,6 +1195,10 @@ static int write_scan_enable(uint8_t scan)
 
 int bt_br_set_connectable(bool enable, bt_br_conn_req_func_t func)
 {
+	if (!atomic_test_bit(bt_dev.flags, BT_DEV_READY)) {
+		return -EAGAIN;
+	}
+
 	if (enable) {
 		if (atomic_test_bit(bt_dev.flags, BT_DEV_PSCAN)) {
 			return -EALREADY;
@@ -1298,6 +1326,19 @@ static void bt_br_limited_discoverable_timeout_handler(struct k_work *work)
 		return;
 	}
 
+	if (!atomic_test_bit(bt_dev.flags, BT_DEV_READY)) {
+		/* bt_disable() is in progress or has completed, so the
+		 * transport may already be closed and no HCI commands can be
+		 * sent here. The controller scan state is handled by the
+		 * disable procedure itself (HCI Reset), or deliberately left
+		 * intact for controllers with the no-reset quirk. If
+		 * disabling fails and the stack resumes operation,
+		 * BT_DEV_READY gets restored with this timer still armed, so
+		 * the limited discoverable deadline keeps being honored.
+		 */
+		return;
+	}
+
 	err = bt_br_set_discoverable(false, false);
 	if (err) {
 		LOG_WRN("Disable discoverable failure (err %d)", err);
@@ -1311,6 +1352,10 @@ static K_WORK_DELAYABLE_DEFINE(bt_br_limited_discoverable_timeout,
 int bt_br_set_discoverable(bool enable, bool limited)
 {
 	int err;
+
+	if (!atomic_test_bit(bt_dev.flags, BT_DEV_READY)) {
+		return -EAGAIN;
+	}
 
 	if (enable) {
 		if (atomic_test_bit(bt_dev.flags, BT_DEV_ISCAN)) {
@@ -1334,8 +1379,8 @@ int bt_br_set_discoverable(bool enable, bool limited)
 		err = write_scan_enable(BT_BREDR_SCAN_INQUIRY | BT_BREDR_SCAN_PAGE);
 		if (!err && (limited == true)) {
 			atomic_set_bit(bt_dev.flags, BT_DEV_LIMITED_DISCOVERABLE_MODE);
-			k_work_reschedule(&bt_br_limited_discoverable_timeout,
-					  K_SECONDS(CONFIG_BT_LIMITED_DISCOVERABLE_DURATION));
+			bt_work_reschedule(&bt_br_limited_discoverable_timeout,
+					   K_SECONDS(CONFIG_BT_LIMITED_DISCOVERABLE_DURATION));
 		}
 		return err;
 	}
@@ -1648,6 +1693,10 @@ int bt_br_write_eir(const struct bt_data *eir, size_t eir_count, bool fec_requir
 	struct bt_hci_cp_write_ext_inquiry_response *cp;
 	struct net_buf *buf;
 	size_t offset = 0;
+
+	if (!atomic_test_bit(bt_dev.flags, BT_DEV_READY)) {
+		return -EAGAIN;
+	}
 
 	buf = bt_hci_cmd_alloc(K_FOREVER);
 	if (buf == NULL) {

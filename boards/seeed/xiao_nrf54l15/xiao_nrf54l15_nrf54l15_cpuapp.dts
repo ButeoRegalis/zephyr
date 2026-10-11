@@ -43,7 +43,7 @@
 
 	chosen {
 		zephyr,code-partition = &slot0_partition;
-		zephyr,sram = &cpuapp_sram;
+		zephyr,sram = &cpuapp_sram_app;
 		zephyr,flash = &cpuapp_rram;
 		zephyr,flash-controller = &rram_controller;
 		zephyr,console = &uart20;
@@ -53,6 +53,7 @@
 	};
 
 	aliases {
+		dmic0 = &dmic_dev;
 		imu0 = &lsm6ds3tr_c;
 	};
 };
@@ -171,6 +172,14 @@ dmic_dev: &pdm20 {
 };
 
 &clock {
+	status = "okay";
+};
+
+&xo {
+	status = "okay";
+};
+
+&lfclk {
 	status = "okay";
 };
 

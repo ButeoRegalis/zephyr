@@ -72,6 +72,16 @@ config BT_L2CAP_CONNLESS
 	help
 	  This option enables Bluetooth L2CAP connectionless data reception
 
+config BT_L2CAP_QOS
+	bool "Bluetooth L2CAP QoS Option [EXPERIMENTAL]"
+	select EXPERIMENTAL
+	help
+	  This option enables negotiation of the Bluetooth L2CAP QoS
+	  configuration option. Only the Best Effort service type is supported,
+	  a peer requesting the Guaranteed service type is counter-proposed
+	  Best Effort. Without this option a QoS option in a Configuration
+	  Request is answered with Unknown Option.
+
 config BT_L2CAP_RET
 	bool "Bluetooth L2CAP retransmission mode [EXPERIMENTAL]"
 	select EXPERIMENTAL
@@ -496,6 +506,18 @@ config BT_A2DP_SINK
 	help
 	  This option enables the A2DP profile sink function
 
+config BT_A2DP_CODEC_MAX_IE_LEN
+	int "Maximum size of A2DP codec IE"
+	default 8
+	# The minimum length is 4 bytes, because the codec specific IE for the mandatory Codec SBC
+	# is 4 bytes.
+	# The maximum length is 253 bytes, because the length field of Length Of Service Capability
+	# (LOSC) is one byte and the header of Media Codec Capabilities is 2 bytes. Thus, the
+	# maximum is 255 - 2.
+	range 4 253
+	help
+	  This option sets the maximum size of A2DP codec IE.
+
 endif # BT_A2DP
 
 config BT_AVCTP
@@ -615,7 +637,7 @@ config BT_DID
 	  This option enables the DID profile
 
 if BT_DID
-config BT_DEVICE_VEDNOR_ID
+config BT_DEVICE_VENDOR_ID
 	hex "Bluetooth Device Vendor ID"
 	range 0x0000 $(UINT16_MAX)
 	default 0x0000
@@ -637,6 +659,19 @@ config BT_DEVICE_VERSION
 	  This option sets the device version
 
 endif # BT_DID
+
+config BT_HID_DEVICE
+	bool "Bluetooth HID Device Profile [EXPERIMENTAL]"
+	select EXPERIMENTAL
+	select BT_DID
+	help
+	  This option enables the HID Device profile.
+
+config BT_HID_HOST
+	bool "Bluetooth HID Host Profile [EXPERIMENTAL]"
+	select EXPERIMENTAL
+	help
+	  This option enables the HID Host profile.
 
 config BT_PAGE_TIMEOUT
 	hex "Bluetooth Page Timeout"
@@ -682,8 +717,9 @@ config BT_GOEP_RFCOMM_MTU
 	# For GOEP over RFCOMM, including,
 	# 255 bytes - the minimum MTU of GOEP,
 	# 4 bytes - L2CAP Header,
-	# 5 bytes - 4 bytes for RFCOMM header with extended length, 1 byte for FCS.
-	range 264 BT_RFCOMM_L2CAP_MTU
+	# 6 bytes - 4 bytes for RFCOMM header with extended length, 1 byte for FCS, and 1 byte for
+	# credits.
+	range 265 BT_RFCOMM_L2CAP_MTU
 	help
 	  Maximum size of RFCOMM MTU for GOEP.
 	  RX MTU will be truncated to account for ACL data and type overhead, the L2CAP PDU header,
@@ -711,6 +747,23 @@ config BT_OEBX_RSP_CODE_TO_STR
 	  codes represented as strings.
 	  See bt_obex_rsp_code_to_str() for more details.
 
+config BT_OBEX_AUTH
+	bool "Bluetooth OBEX Authentication support"
+	select PSA_WANT_ALG_MD5
+	select MBEDTLS
+	help
+	  This option enables OBEX authentication feature.
+	  OBEX authentication uses MD5, which is cryptographically weak.
+	  It provides only limited security.
+
+config BT_OBEX_AUTH_PWD_LEN
+	int "Maximum OBEX Authentication Password Length"
+	depends on BT_OBEX_AUTH
+	default 16
+	range 1 255
+	help
+	  This option sets the maximum length of OBEX authentication password.
+
 endif # BT_GOEP
 
 config BT_BIP
@@ -723,7 +776,7 @@ config BT_BIP
 config BT_PBAP
 	bool
 	select BT_GOEP
-	select PSA_WANT_ALG_MD5
+	select BT_OBEX_AUTH
 	help
 	  This option enables the PBAP profile
 

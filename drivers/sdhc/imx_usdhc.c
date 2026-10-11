@@ -12,9 +12,11 @@
 #include <zephyr/sd/sd_spec.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/reset.h>
 #include <zephyr/logging/log.h>
 #include <soc.h>
 #include <zephyr/drivers/pinctrl.h>
+#include "sdhc_helpers.h"
 #define PINCTRL_STATE_SLOW   PINCTRL_STATE_PRIV_START
 #define PINCTRL_STATE_MED    (PINCTRL_STATE_PRIV_START + 1U)
 #define PINCTRL_STATE_FAST   (PINCTRL_STATE_PRIV_START + 2U)
@@ -65,6 +67,7 @@ struct usdhc_config {
 	uint8_t nusdhc;
 	const struct gpio_dt_spec pwr_gpio;
 	const struct gpio_dt_spec detect_gpio;
+	bool non_removable;
 	bool detect_dat3;
 	bool detect_cd;
 	bool no_180_vol;
@@ -82,6 +85,7 @@ struct usdhc_config {
 	bool mmc_hs200_1_8v;
 	bool mmc_hs400_1_8v;
 	const struct pinctrl_dev_config *pincfg;
+	struct reset_dt_spec reset;
 	void (*irq_config_func)(const struct device *dev);
 };
 
@@ -268,11 +272,13 @@ static void imx_usdhc_init_host_props(const struct device *dev)
 	props->power_delay = cfg->power_delay_ms;
 	/* Read host capabilities */
 	USDHC_GetCapability(base, &caps);
+#if !(defined(FSL_FEATURE_USDHC_HAS_NO_VS18) && FSL_FEATURE_USDHC_HAS_NO_VS18)
 	if (cfg->no_180_vol) {
 		props->host_caps.vol_180_support = false;
 	} else {
 		props->host_caps.vol_180_support = (bool)(caps.flags & kUSDHC_SupportV180Flag);
 	}
+#endif
 	if (cfg->no_300_vol) {
 		props->host_caps.vol_300_support = false;
 	} else {
@@ -342,9 +348,9 @@ static int imx_usdhc_set_io(const struct device *dev, struct sdhc_io *ios)
 	struct sdhc_io *host_io = &data->host_io;
 	USDHC_Type *base = get_base(dev);
 
-	LOG_DBG("SDHC I/O: bus width %d, clock %dHz, card power %s, voltage %s", ios->bus_width,
-		ios->clock, ios->power_mode == SDHC_POWER_ON ? "ON" : "OFF",
-		ios->signal_voltage == SD_VOL_1_8_V ? "1.8V" : "3.3V");
+	LOG_DBG("SDHC I/O: bus width %d, clock %dHz, card power %s, timing %s, voltage %s",
+		ios->bus_width, ios->clock, ios->power_mode == SDHC_POWER_ON ? "ON" : "OFF",
+		sdhc_timing_mode_str(ios->timing), sd_voltage_str(ios->signal_voltage));
 
 	if (clock_control_get_rate(cfg->clock_dev, cfg->clock_subsys, &src_clk_hz)) {
 		return -EINVAL;
@@ -962,6 +968,8 @@ static int imx_usdhc_get_card_present(const struct device *dev)
 		data->card_present = USDHC_DetectCardInsert(base);
 	} else if (cfg->detect_gpio.port) {
 		data->card_present = gpio_pin_get_dt(&cfg->detect_gpio) > 0;
+	} else if (cfg->non_removable) {
+		data->card_present = true;
 	} else {
 		LOG_WRN("No card detection method configured, assuming card "
 			"is present");
@@ -1128,6 +1136,19 @@ static int imx_usdhc_init(const struct device *dev)
 		return -ENODEV;
 	}
 
+	if (cfg->reset.dev != NULL) {
+		if (!device_is_ready(cfg->reset.dev)) {
+			LOG_ERR("reset controller not ready");
+			return -ENODEV;
+		}
+
+		ret = reset_line_deassert_dt(&cfg->reset);
+		if (ret != 0) {
+			LOG_ERR("Failed to deassert reset line (%d)", ret);
+			return ret;
+		}
+	}
+
 	ret = pinctrl_apply_state(cfg->pincfg, PINCTRL_STATE_DEFAULT);
 	if (ret) {
 		return ret;
@@ -1149,6 +1170,8 @@ static int imx_usdhc_init(const struct device *dev)
 		if (ret) {
 			return ret;
 		}
+	} else if (cfg->non_removable) {
+		LOG_INF("No power control GPIO defined for non-removable SDIO device");
 	} else {
 		LOG_WRN("No power control GPIO defined. Without power control,\n"
 			"the SD card may fail to communicate with the host");
@@ -1204,16 +1227,10 @@ static DEVICE_API(sdhc, usdhc_api) = {
 	.disable_interrupt = imx_usdhc_disable_interrupt,
 };
 
-#ifdef CONFIG_NOCACHE_MEMORY
-#define IMX_USDHC_NOCACHE_TAG __attribute__((__section__(".nocache")));
-#else
-#define IMX_USDHC_NOCACHE_TAG
-#endif
-
 #ifdef CONFIG_IMX_USDHC_DMA_SUPPORT
 #define IMX_USDHC_DMA_BUFFER_DEFINE(n)                                                             \
 	static uint32_t __aligned(32)                                                              \
-	usdhc_##n##_dma_descriptor[CONFIG_IMX_USDHC_DMA_BUFFER_SIZE / 4] IMX_USDHC_NOCACHE_TAG;
+	usdhc_##n##_dma_descriptor[CONFIG_IMX_USDHC_DMA_BUFFER_SIZE / 4] __nocache;
 #define IMX_USDHC_DMA_BUFFER_INIT(n)                                                               \
 	.usdhc_dma_descriptor = usdhc_##n##_dma_descriptor,                                        \
 	.dma_descriptor_len = CONFIG_IMX_USDHC_DMA_BUFFER_SIZE / 4,
@@ -1239,6 +1256,7 @@ static DEVICE_API(sdhc, usdhc_api) = {
 		.nusdhc = n,                                                                       \
 		.pwr_gpio = GPIO_DT_SPEC_INST_GET_OR(n, pwr_gpios, {0}),                           \
 		.detect_gpio = GPIO_DT_SPEC_INST_GET_OR(n, cd_gpios, {0}),                         \
+		.non_removable = DT_INST_PROP_OR(n, non_removable, false),                         \
 		.data_timeout = DT_INST_PROP(n, data_timeout),                                     \
 		.detect_dat3 = DT_INST_PROP(n, detect_dat3),                                       \
 		.detect_cd = DT_INST_PROP(n, detect_cd),                                           \
@@ -1254,6 +1272,7 @@ static DEVICE_API(sdhc, usdhc_api) = {
 		.power_delay_ms = DT_INST_PROP(n, power_delay_ms),                                 \
 		.mmc_hs200_1_8v = DT_INST_PROP(n, mmc_hs200_1_8v),                                 \
 		.mmc_hs400_1_8v = DT_INST_PROP(n, mmc_hs400_1_8v),                                 \
+		.reset = RESET_DT_SPEC_INST_GET_OR(n, {0}),                                        \
 		.irq_config_func = usdhc_##n##_irq_config_func,                                    \
 		.pincfg = PINCTRL_DT_INST_DEV_CONFIG_GET(n),                                       \
 	};                                                                                         \

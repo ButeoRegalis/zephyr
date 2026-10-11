@@ -14,26 +14,23 @@
 #include <ipi.h>
 
 
-#ifdef IAR_SUPPRESS_ALWAYS_INLINE_WARNING_FLAG
-TOOLCHAIN_DISABLE_WARNING(TOOLCHAIN_WARNING_ALWAYS_INLINE)
-#endif
 static ALWAYS_INLINE void *thread_runq(struct k_thread *thread)
 {
 #ifdef CONFIG_SCHED_CPU_MASK_PIN_ONLY
-	uint16_t cpu_mask = thread->base.cpu_mask;
-	int cpu;
+	uint32_t cpu_mask = thread->base.cpu_mask;
 
-	/* Edge case: it's legal per the API to "make runnable" a
-	 * thread with all CPUs masked off (i.e. one that isn't
-	 * actually runnable!).  Sort of a wart in the API and maybe
-	 * we should address this in docs/assertions instead to avoid
-	 * the extra test.
+	__ASSERT(cpu_mask != 0U, "thread queued with empty CPU mask");
+
+	unsigned int cpu = (unsigned int)u32_count_trailing_zeros(cpu_mask);
+
+	__ASSERT(cpu < ARRAY_SIZE(_kernel.cpus),
+		 "cpu_mask bit %u exceeds cpu count %zu",
+		 cpu, ARRAY_SIZE(_kernel.cpus));
+
+	/* Clamp so static-analysis tools that cannot see the assert
+	 * above do not flag the array access as out-of-bounds.
 	 */
-	if (cpu_mask == 0U) {
-		cpu = 0;
-	} else {
-		cpu = u32_count_trailing_zeros(cpu_mask);
-	}
+	cpu = MIN(cpu, (unsigned int)(ARRAY_SIZE(_kernel.cpus) - 1U));
 
 	return &_kernel.cpus[cpu].ready_q.runq;
 #else
@@ -107,8 +104,5 @@ static ALWAYS_INLINE void dequeue_thread(struct k_thread *thread)
 		runq_remove(thread);
 	}
 }
-#ifdef IAR_SUPPRESS_ALWAYS_INLINE_WARNING_FLAG
-TOOLCHAIN_ENABLE_WARNING(TOOLCHAIN_WARNING_ALWAYS_INLINE)
-#endif
 
 #endif /* ZEPHYR_KERNEL_INCLUDE_RUN_Q_H_ */

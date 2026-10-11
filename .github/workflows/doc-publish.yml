@@ -20,6 +20,7 @@ jobs:
   doc-publish:
     name: Publish Documentation
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: |
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.conclusion == 'success' &&
@@ -27,7 +28,7 @@ jobs:
 
     steps:
     - name: Download artifacts
-      uses: dawidd6/action-download-artifact@8305c0f1062bb0d184d09ef4493ecb9288447732 # v20
+      uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7 # v24
       with:
         workflow: doc-build.yml
         run_id: ${{ github.event.workflow_run.id }}
@@ -40,7 +41,7 @@ jobs:
         fi
 
     - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
       with:
         aws-access-key-id: ${{ vars.AWS_DOCS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_DOCS_SECRET_ACCESS_KEY }}

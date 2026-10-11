@@ -19,9 +19,10 @@
  * @{
  */
 
-#ifndef ZEPHYR_INCLUDE_DRIVERS_INPUT_INPUT_CRSF_H_
-#define ZEPHYR_INCLUDE_DRIVERS_INPUT_INPUT_CRSF_H_
+#ifndef ZEPHYR_INCLUDE_INPUT_INPUT_CRSF_H_
+#define ZEPHYR_INCLUDE_INPUT_INPUT_CRSF_H_
 
+#include <zephyr/device.h>
 #include <zephyr/types.h>
 
 #ifdef __cplusplus
@@ -215,4 +216,4 @@ struct crsf_link_stats input_crsf_get_link_stats(const struct device *dev);
 
 /** @} */
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_INPUT_INPUT_CRSF_H_ */
+#endif /* ZEPHYR_INCLUDE_INPUT_INPUT_CRSF_H_ */

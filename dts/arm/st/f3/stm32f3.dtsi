@@ -86,10 +86,12 @@
 
 			#address-cells = <1>;
 			#size-cells = <1>;
+			ranges;
 
 			flash0: flash@8000000 {
 				compatible = "st,stm32-nv-flash", "soc-nv-flash";
-
+				#address-cells = <1>;
+				#size-cells = <1>;
 				write-block-size = <2>;
 				erase-block-size = <2048>;
 				/* maximum erase time for a 2K sector */
@@ -162,6 +164,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			reg = <0x48000000 0x1800>;
+			ranges;
 
 			gpioa: gpio@48000000 {
 				compatible = "st,stm32-gpio";
@@ -442,7 +445,7 @@
 			#dma-cells = <2>;
 			reg = <0x40020000 0x400>;
 			clocks = <&rcc STM32_CLOCK(AHB1, 0)>;
-			interrupts = <11 0 12 0 13 0 14 0 15 0 16 0 17 0>;
+			interrupts = <11 0>, <12 0>, <13 0>, <14 0>, <15 0>, <16 0>, <17 0>;
 			status = "disabled";
 		};
 

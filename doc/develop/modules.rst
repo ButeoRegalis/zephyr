@@ -594,7 +594,7 @@ be monitored for your module. The supported formats are:
        - <an-other-module-related-cpe>
        - <module-related-purl>
 
-A real life example for ``mbedTLS`` module could look like this:
+A real life example for Mbed TLS module could look like this:
 
 .. code-block:: yaml
 
@@ -999,7 +999,7 @@ when executing twister, for example:
 
   ./scripts/zephyr_module.py --twister-out module_tests.args
   if [ -s module_tests.args ]; then
-      ./scripts/twister +module_tests.args --outdir module_tests ...
+      west twister +module_tests.args --outdir module_tests ...
   fi
 
 

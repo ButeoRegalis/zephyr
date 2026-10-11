@@ -259,7 +259,7 @@ static void test_recv_2(int count)
 
 	memcpy(feed_buf, &frame2, sizeof(frame2));
 
-	NET_DBG("Reading %d bytes at a time, frame %zd hdr %zd", count,
+	NET_DBG("Reading %d bytes at a time, frame %zu hdr %zu", count,
 		sizeof(frame2), FRAME1_HDR_SIZE);
 
 	total_read = test_recv_buf(&feed_buf[0], count, &ctx, &msg_type,
@@ -297,6 +297,15 @@ int verify_sent_and_received_msg(struct net_msghdr *msg, bool split_msg)
 	uint64_t remaining = -1;
 	size_t split_len = 0, total_read = 0;
 	int ret;
+
+	/* The handshake tests close their socket when they are done, which
+	 * sends an empty CLOSE frame through here. There is no payload to feed
+	 * back for that one.
+	 */
+	if ((((uint8_t *)msg->msg_iov[0].iov_base)[0] & 0x0f) ==
+	    WEBSOCKET_OPCODE_CLOSE) {
+		return msg->msg_iov[0].iov_len;
+	}
 
 	memset(&ctx, 0, sizeof(ctx));
 
@@ -341,17 +350,17 @@ int verify_sent_and_received_msg(struct net_msghdr *msg, bool split_msg)
 					"Received message should be");
 			LOG_HEXDUMP_ERR(recv_buf, ret, "but it was instead");
 			zassert_true(false, "Invalid received message "
-				     "after %d bytes", total_read);
+				     "after %zu bytes", total_read);
 		}
 
 		total_read += ret;
 	}
 
 	zassert_equal(total_read, test_msg_len,
-		      "Msg body not valid, received %d instead of %zd",
+		      "Msg body not valid, received %zu instead of %zu",
 		      total_read, test_msg_len);
 
-	NET_DBG("Received %zd header and %zd body",
+	NET_DBG("Received %zu header and %zu body",
 		msg->msg_iov[0].iov_len, total_read);
 
 	return msg->msg_iov[0].iov_len + total_read;

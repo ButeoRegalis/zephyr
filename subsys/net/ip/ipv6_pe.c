@@ -87,7 +87,8 @@ static K_MUTEX_DEFINE(lock);
 #endif
 
 /* We need to periodically update the private address. */
-static struct k_work_delayable temp_lifetime;
+static void ipv6_pe_renew(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(temp_lifetime, ipv6_pe_renew);
 
 static bool ipv6_pe_use_this_prefix(const struct net_in6_addr *prefix)
 {
@@ -203,7 +204,8 @@ static bool ipv6_pe_prefix_update_lifetimes(struct net_if_ipv6 *ipv6,
 			break;
 		}
 
-		net_if_ipv6_addr_update_lifetime(&ipv6->unicast[i], vlifetime);
+		net_if_ipv6_addr_update_lifetime_locked(&ipv6->unicast[i],
+							vlifetime);
 
 		/* RFC 8981 ch 3.5, "... at most one temporary address per
 		 * prefix should be in a non-deprecated state at any given
@@ -216,6 +218,9 @@ static bool ipv6_pe_prefix_update_lifetimes(struct net_if_ipv6 *ipv6,
 	return false;
 }
 
+/* RFC 8981 ch 3.3.2 requires a secret distinct from the stable IID one */
+static psa_key_id_t secret_key_id = PSA_KEY_ID_NULL;
+
 /* RFC 8981 ch 3.3.2 */
 static int gen_temporary_iid(struct net_if *iface,
 			     const struct net_in6_addr *prefix,
@@ -224,14 +229,11 @@ static int gen_temporary_iid(struct net_if *iface,
 			     uint8_t *temporary_iid,
 			     size_t temporary_iid_len)
 {
-	psa_key_id_t key_id;
-	psa_key_attributes_t key_attr = PSA_KEY_ATTRIBUTES_INIT;
 	psa_mac_operation_t mac_op = PSA_MAC_OPERATION_INIT;
+	psa_key_id_t key_id;
 	psa_status_t status;
 	uint8_t digest[32];
 	size_t digest_len;
-	static bool once;
-	static uint8_t secret_key[16]; /* Min 128 bits, RFC 8981 ch 3.3.2 */
 	struct {
 		struct net_in6_addr prefix;
 		uint32_t current_time;
@@ -253,18 +255,9 @@ static int gen_temporary_iid(struct net_if *iface,
 	memcpy(buf.mac, net_if_get_link_addr(iface)->addr,
 	       MIN(sizeof(buf.mac), net_if_get_link_addr(iface)->len));
 
-	if (!once) {
-		sys_rand_get(&secret_key, sizeof(secret_key));
-		once = true;
-	}
-
-	psa_set_key_type(&key_attr, PSA_KEY_TYPE_HMAC);
-	psa_set_key_algorithm(&key_attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
-	psa_set_key_usage_flags(&key_attr, PSA_KEY_USAGE_SIGN_MESSAGE);
-	status = psa_import_key(&key_attr, secret_key, sizeof(secret_key), &key_id);
-	if (status != PSA_SUCCESS) {
-		NET_DBG("Cannot %s hmac (%d)", "import key", status);
-		goto err;
+	key_id = net_ipv6_iid_key_get(&secret_key_id);
+	if (key_id == PSA_KEY_ID_NULL) {
+		return -EIO;
 	}
 
 	status = psa_mac_sign_setup(&mac_op, key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256));
@@ -289,7 +282,6 @@ static int gen_temporary_iid(struct net_if *iface,
 
 err:
 	psa_mac_abort(&mac_op);
-	psa_destroy_key(key_id);
 
 	return (status == PSA_SUCCESS) ? 0 : -EIO;
 }
@@ -780,7 +772,6 @@ int net_ipv6_pe_init(struct net_if *iface)
 		IS_ENABLED(CONFIG_NET_IPV6_PE_PREFER_PUBLIC_ADDRESSES) ?
 		true : false;
 
-	k_work_init_delayable(&temp_lifetime, ipv6_pe_renew);
 	k_work_init_delayable(&trigger_deprecated_event.work,
 			      send_deprecated_event);
 

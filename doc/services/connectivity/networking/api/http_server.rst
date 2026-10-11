@@ -14,7 +14,8 @@ Zephyr provides an HTTP server library, which allows to register HTTP services
 and HTTP resources associated with those services. The server creates a listening
 socket for every registered service, and handles incoming client connections.
 It's possible to communicate over a plain TCP socket (HTTP) or a TLS socket (HTTPS).
-Both, HTTP/1.1 (RFC 2616) and HTTP/2 (RFC 9113) protocol versions are supported.
+HTTP/1.1 (:rfc:`2616`), HTTP/2 (:rfc:`9113`) and HTTP/3 (:rfc:`9114`) protocol
+versions are supported.
 
 The server operation is generally transparent for the application, running in a
 background thread. The application can control the server activity with
@@ -409,7 +410,9 @@ The ``request_ctx`` parameter is used to pass request data to the application:
 
 * The ``headers``, ``header_count`` and ``headers_status`` fields pass request
   headers to the application, if
-  :kconfig:option:`CONFIG_HTTP_SERVER_CAPTURE_HEADERS` is enabled.
+  :kconfig:option:`CONFIG_HTTP_SERVER_CAPTURE_HEADERS` is enabled. These fields
+  are only populated in the first callback of a request; see
+  :ref:`http_server_interface_accessing_request_headers` for details.
 
 The ``response_ctx`` field is used by the application to pass response data to
 the HTTP server:
@@ -475,36 +478,69 @@ processing of the Websocket connection is application-specific, hence outside
 of scope of this guide. See :zephyr:code-sample:`sockets-http-server` for an
 example Websocket-based echo service implementation.
 
+.. _http_server_interface_accessing_request_headers:
+
 Accessing request headers
 =========================
 
 The application can register an interest in any specific HTTP request headers.
 These headers are then stored for each incoming request, and can be accessed
-from within a dynamic resource callback. Request headers are only included in
-the first callback for a given request, and are not passed to any subsequent
-callbacks.
+from within a dynamic resource callback.
+
+.. important::
+
+   Captured request headers are delivered to the application **only in the first
+   callback** for a given request. In any subsequent callback for the same
+   request the ``headers``, ``header_count`` and ``headers_status`` fields of
+   ``request_ctx`` are cleared (``headers_status`` becomes
+   :c:enumerator:`HTTP_HEADER_STATUS_NONE`). Applications must copy out any
+   header value they need during the first callback rather than reading it later.
+
+   Note that the first callback may or may not also carry request body data
+   (this depends on the HTTP method and on transport framing). Do not condition
+   header handling on the presence of body data: always inspect
+   ``headers_status`` and stash the headers when it is not
+   :c:enumerator:`HTTP_HEADER_STATUS_NONE`.
 
 This feature must first be enabled with
 :kconfig:option:`CONFIG_HTTP_SERVER_CAPTURE_HEADERS` Kconfig option.
 
 Then the application can register headers to be captured, and read the values
-from within the dynamic resource callback:
+from within the dynamic resource callback. The recommended pattern is to copy
+out the headers of interest in the first callback, then act on them once the
+full request body has been received:
 
 .. code-block:: c
 
     HTTP_SERVER_REGISTER_HEADER_CAPTURE(capture_user_agent, "User-Agent");
 
+    static char user_agent[64];
+
     static int dyn_handler(struct http_client_ctx *client, enum http_transaction_status status,
                            const struct http_request_ctx *request_ctx,
                            struct http_response_ctx *response_ctx, void *user_data)
     {
-        size_t header_count = client->header_capture_ctx.count;
-        const struct http_header *headers = client->header_capture_ctx.headers;
+        /* Request headers are only present in the first callback, so copy out
+         * any values needed later before they are gone.
+         */
+        if (request_ctx->headers_status != HTTP_HEADER_STATUS_NONE) {
+            for (size_t i = 0; i < request_ctx->header_count; i++) {
+                const struct http_header *hdr = &request_ctx->headers[i];
 
-        LOG_INF("Captured %d headers with request", header_count);
+                LOG_INF("Captured header: '%s: %s'", hdr->name, hdr->value);
 
-        for (uint32_t i = 0; i < header_count; i++) {
-            LOG_INF("Header: '%s: %s'", headers[i].name, headers[i].value);
+                if (strcasecmp(hdr->name, "User-Agent") == 0) {
+                    strncpy(user_agent, hdr->value, sizeof(user_agent) - 1);
+                }
+            }
+        }
+
+        /* Process request body data (may be empty in the first callback). */
+
+        if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
+            /* Full request received: act on the body together with the header
+             * values stashed above (e.g. user_agent).
+             */
         }
 
         return 0;

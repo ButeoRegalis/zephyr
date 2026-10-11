@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -55,8 +55,6 @@ LOG_MODULE_REGISTER(mfd_infineon_autanalog, CONFIG_MFD_LOG_LEVEL);
 
 #define IFX_AUTANALOG_AC_INTR_MASK CY_AUTANALOG_INT_AC
 
-/* clang-format on */
-
 /** Interrupt mask lookup table indexed by peripheral type */
 static const uint32_t ifx_autanalog_intr_masks[IFX_AUTANALOG_PERIPH_COUNT] = {
 	[IFX_AUTANALOG_PERIPH_SAR_ADC] = IFX_AUTANALOG_SAR_ADC_INTR_MASK,
@@ -74,7 +72,7 @@ static const uint32_t ifx_autanalog_intr_masks[IFX_AUTANALOG_PERIPH_COUNT] = {
  * Two modes are supported:
  *
  * Basic mode (no ac-states property):
- *   A hardcoded 3-state SAR single-shot sequence is generated.  SAR fields
+ *   A hardcoded 4-state SAR single-shot sequence is generated.  SAR fields
  *   are populated at compile time when the SAR ADC child node is enabled.
  *
  * Advanced mode (ac-states property present):
@@ -86,42 +84,258 @@ static const uint32_t ifx_autanalog_intr_masks[IFX_AUTANALOG_PERIPH_COUNT] = {
 /** 1 when the ac-states property is present on instance n */
 #define HAS_AC_STATES(n) DT_INST_NODE_HAS_PROP(n, ac_states)
 
+/** True when any enabled basic-mode instance has SAR enabled */
+#define IFX_AUTANALOG_BASIC_MODE_SAR_COUNT_ENTRY(n)                                           \
+	+ COND_CODE_1(HAS_AC_STATES(n), (0), (COND_CODE_1(SAR_IS_USED(n), (1), (0))))
+#define IFX_AUTANALOG_BASIC_MODE_HAS_SAR                                                      \
+	((0 DT_INST_FOREACH_STATUS_OKAY(IFX_AUTANALOG_BASIC_MODE_SAR_COUNT_ENTRY)) > 0)
+
+/*
+ * Child node accessors — centralise the SoC-specific DT node name tokens
+ * so that the rest of the driver is address-independent.
+ */
+#define SAR_NODE(n)    DT_CHILD(DT_DRV_INST(n), adc0_80000)
+#define PRB_NODE(n)    DT_CHILD(DT_DRV_INST(n), prb_e0300)
+#define PTCOMP_NODE(n) DT_CHILD(DT_DRV_INST(n), ptcomp_40000)
+#define CTB0_NODE(n)   DT_CHILD(DT_DRV_INST(n), ctb0_0)
+#define CTB1_NODE(n)   DT_CHILD(DT_DRV_INST(n), ctb1_10000)
+#define DAC0_NODE(n)   DT_CHILD(DT_DRV_INST(n), dac0_60000)
+#define DAC1_NODE(n)   DT_CHILD(DT_DRV_INST(n), dac1_70000)
+
 /** 1 when the SAR ADC child node is enabled */
-#define SAR_IS_USED(n) DT_NODE_HAS_STATUS(DT_CHILD(DT_DRV_INST(n), adc0_80000), okay)
+#define SAR_IS_USED(n) DT_NODE_HAS_STATUS(SAR_NODE(n), okay)
 
-/* clang-format off */
+/** 1 when the SAR ADC child is enabled and configured for LP mode */
+#define SAR_LP_MODE(n)                                                                         \
+	COND_CODE_1(SAR_IS_USED(n), (DT_PROP(SAR_NODE(n), lp_mode)), (0))
 
-/* ===== Basic mode: hardcoded 3-state SAR single-shot STT ===== */
+/** 1 when the PRB child node is enabled */
+#define PRB_IS_USED(n) DT_NODE_HAS_STATUS(PRB_NODE(n), okay)
 
-#define IFX_AUTANALOG_BASIC_NUM_STT 3
+/** 1 when the PRB child is enabled and configured for LP mode */
+#define PRB_LP_MODE(n)                                                                         \
+	COND_CODE_1(PRB_IS_USED(n), (DT_PROP(PRB_NODE(n), lp_mode)), (0))
+
+/** 1 when the PTCOMP child node is enabled */
+#define PTCOMP_IS_USED(n) DT_NODE_HAS_STATUS(PTCOMP_NODE(n), okay)
+
+/** 1 when the PTCOMP child is enabled and configured for LP mode */
+#define PTCOMP_LP_MODE(n)                                                                      \
+	COND_CODE_1(PTCOMP_IS_USED(n), (DT_PROP(PTCOMP_NODE(n), lp_mode)), (0))
+
+/** 1 when the CTB0 child node is enabled */
+#define CTB0_IS_USED(n) DT_NODE_HAS_STATUS(CTB0_NODE(n), okay)
+
+/** 1 when the CTB0 child is enabled and configured for LP mode */
+#define CTB0_LP_MODE(n)                                                                        \
+	COND_CODE_1(CTB0_IS_USED(n), (DT_PROP(CTB0_NODE(n), lp_mode)), (0))
+
+/** 1 when the CTB1 child node is enabled */
+#define CTB1_IS_USED(n) DT_NODE_HAS_STATUS(CTB1_NODE(n), okay)
+
+/** 1 when the CTB1 child is enabled and configured for LP mode */
+#define CTB1_LP_MODE(n)                                                                        \
+	COND_CODE_1(CTB1_IS_USED(n), (DT_PROP(CTB1_NODE(n), lp_mode)), (0))
+
+/** 1 when the DAC0 child node is enabled */
+#define DAC0_IS_USED(n) DT_NODE_HAS_STATUS(DAC0_NODE(n), okay)
+
+/** 1 when the DAC0 child is enabled and configured for LP mode */
+#define DAC0_LP_MODE(n)                                                                        \
+	COND_CODE_1(DAC0_IS_USED(n), (DT_PROP(DAC0_NODE(n), lp_mode)), (0))
+
+/** 1 when the DAC1 child node is enabled */
+#define DAC1_IS_USED(n) DT_NODE_HAS_STATUS(DAC1_NODE(n), okay)
+
+/** 1 when the DAC1 child is enabled and configured for LP mode */
+#define DAC1_LP_MODE(n)                                                                        \
+	COND_CODE_1(DAC1_IS_USED(n), (DT_PROP(DAC1_NODE(n), lp_mode)), (0))
+
+/** 1 when any enabled child peripheral requests LP mode */
+#define AUTANALOG_LP_MODE(n)                                                                   \
+	(SAR_LP_MODE(n) || PRB_LP_MODE(n) || PTCOMP_LP_MODE(n) ||                                 \
+	 CTB0_LP_MODE(n) || CTB1_LP_MODE(n) || DAC0_LP_MODE(n) || DAC1_LP_MODE(n))
+
+/*
+ * Helper macros to read the gain property from an opamp child node
+ * nested inside a CTB child of this AutAnalog instance.
+ * Path: CTB node → opamp_oa_idx
+ */
+#define CTB_OA_NODE(ctb_node, oa_idx)  DT_CHILD(ctb_node, opamp_##oa_idx)
+#define CTB_OA_EXISTS(ctb_node, oa_idx) DT_NODE_EXISTS(CTB_OA_NODE(ctb_node, oa_idx))
+#define CTB_OA_GAIN(ctb_node, oa_idx)                                                          \
+	COND_CODE_1(CTB_OA_EXISTS(ctb_node, oa_idx), \
+		    (DT_PROP(CTB_OA_NODE(ctb_node, oa_idx), gain)), (0))
+
+/*
+ * Default DAC channel for basic-mode STT entries.
+ * Channels 0-14 are hardware waveform channels driven by the AC state machine.
+ * Channel 15 is the firmware (FW) channel for direct CPU writes via the Zephyr DAC API.
+ */
+#define IFX_AUTANALOG_DEFAULT_DAC_CHAN 15
+
+/* ===== Basic mode: hardcoded 4-state SAR single-shot STT ===== */
+#define IFX_AUTANALOG_BASIC_NUM_STT 4
 
 #define IFX_AUTANALOG_BASIC_STT(n)                                                               \
 	static cy_stc_autanalog_stt_ac_t ifx_autanalog_ac_stt_##n[] = {                          \
 		{                                                                                \
 			.unlock = true,                                                          \
+			.lpMode = AUTANALOG_LP_MODE(n),                                          \
 			.condition = CY_AUTANALOG_STT_AC_CONDITION_BLOCK_READY,                  \
 			.action = CY_AUTANALOG_STT_AC_ACTION_WAIT_FOR,                           \
-			.branchState = 1,                                                        \
-		},                                                                               \
-		{                                                                                \
-			.condition = CY_AUTANALOG_STT_AC_CONDITION_SAR_DONE,                     \
-			.action = CY_AUTANALOG_STT_AC_ACTION_WAIT_FOR,                           \
-			.branchState = 0,                                                        \
 		},                                                                               \
 		{                                                                                \
 			.condition = CY_AUTANALOG_STT_AC_CONDITION_FALSE,                        \
 			.action = CY_AUTANALOG_STT_AC_ACTION_STOP,                               \
 		},                                                                               \
+		{                                                                                \
+			.condition = CY_AUTANALOG_STT_AC_CONDITION_SAR_EOS,                      \
+			.action = CY_AUTANALOG_STT_AC_ACTION_WAIT_FOR,                           \
+		},                                                                               \
+		{                                                                                \
+			.unlock = false,                                                         \
+			.condition = CY_AUTANALOG_STT_AC_CONDITION_TRUE,                    \
+			.action = CY_AUTANALOG_STT_AC_ACTION_BRANCH_IF_TRUE,                     \
+			.branchState = 1U,                                                       \
+		},                                                                               \
 	};                                                                                       \
 	static cy_stc_autanalog_stt_sar_t ifx_autanalog_sar_stt_##n[] = {                        \
+		{.unlock = SAR_IS_USED(n), .enable = SAR_IS_USED(n)},                            \
 		{.unlock = SAR_IS_USED(n), .enable = SAR_IS_USED(n)},                            \
 		{.unlock = SAR_IS_USED(n), .enable = SAR_IS_USED(n), .trigger = SAR_IS_USED(n)}, \
 		{.unlock = SAR_IS_USED(n), .enable = SAR_IS_USED(n)},                            \
 	};                                                                                       \
-	static cy_stc_autanalog_stt_t ifx_autanalog_stt_##n[] = {                                \
-		{.ac = &ifx_autanalog_ac_stt_##n[0], .sar = {&ifx_autanalog_sar_stt_##n[0]}},    \
-		{.ac = &ifx_autanalog_ac_stt_##n[1], .sar = {&ifx_autanalog_sar_stt_##n[1]}},    \
-		{.ac = &ifx_autanalog_ac_stt_##n[2], .sar = {&ifx_autanalog_sar_stt_##n[2]}},    \
+	static cy_stc_autanalog_stt_ptcomp_t ifx_autanalog_ptcomp0_stt_##n[] = {                   \
+		{.unlock = PTCOMP_IS_USED(n),                                                      \
+		 .enableComp0 = PTCOMP_IS_USED(n),                                                 \
+		 .dynCfgIdxComp0 = 0,                                                              \
+		 .enableComp1 = PTCOMP_IS_USED(n),                                                 \
+		 .dynCfgIdxComp1 = 1},                                                             \
+		{.unlock = PTCOMP_IS_USED(n),                                                      \
+		 .enableComp0 = PTCOMP_IS_USED(n),                                                 \
+		 .dynCfgIdxComp0 = 0,                                                              \
+		 .enableComp1 = PTCOMP_IS_USED(n),                                                 \
+		 .dynCfgIdxComp1 = 1},                                                             \
+		{.unlock = PTCOMP_IS_USED(n),                                                      \
+		 .enableComp0 = PTCOMP_IS_USED(n),                                                 \
+		 .dynCfgIdxComp0 = 0,                                                              \
+		 .enableComp1 = PTCOMP_IS_USED(n),                                                 \
+		 .dynCfgIdxComp1 = 1},                                                             \
+		{.unlock = PTCOMP_IS_USED(n),                                                      \
+		 .enableComp0 = PTCOMP_IS_USED(n),                                                 \
+		 .dynCfgIdxComp0 = 0,                                                              \
+		 .enableComp1 = PTCOMP_IS_USED(n),                                                 \
+		 .dynCfgIdxComp1 = 1},                                                             \
+	};                                                                                         \
+	static cy_stc_autanalog_stt_ctb_t ifx_autanalog_ctb0_stt_##n[] = {                         \
+		{.unlock = CTB0_IS_USED(n),                                                        \
+		 .enableOpamp0 = CTB0_IS_USED(n),                                                  \
+		 .cfgOpamp0 = 0,                                                                   \
+		 .gainOpamp0 = CTB_OA_GAIN(CTB0_NODE(n), 0),                                       \
+		 .enableOpamp1 = CTB0_IS_USED(n),                                                  \
+		 .cfgOpamp1 = 1,                                                                   \
+		 .gainOpamp1 = CTB_OA_GAIN(CTB0_NODE(n), 1)},                                      \
+		{.unlock = CTB0_IS_USED(n),                                                        \
+		 .enableOpamp0 = CTB0_IS_USED(n),                                                  \
+		 .cfgOpamp0 = 0,                                                                   \
+		 .gainOpamp0 = CTB_OA_GAIN(CTB0_NODE(n), 0),                                       \
+		 .enableOpamp1 = CTB0_IS_USED(n),                                                  \
+		 .cfgOpamp1 = 1,                                                                   \
+		 .gainOpamp1 = CTB_OA_GAIN(CTB0_NODE(n), 1)},                                      \
+		{.unlock = CTB0_IS_USED(n),                                                        \
+		 .enableOpamp0 = CTB0_IS_USED(n),                                                  \
+		 .cfgOpamp0 = 0,                                                                   \
+		 .gainOpamp0 = CTB_OA_GAIN(CTB0_NODE(n), 0),                                       \
+		 .enableOpamp1 = CTB0_IS_USED(n),                                                  \
+		 .cfgOpamp1 = 1,                                                                   \
+		 .gainOpamp1 = CTB_OA_GAIN(CTB0_NODE(n), 1)},                                      \
+		{.unlock = CTB0_IS_USED(n),                                                        \
+		 .enableOpamp0 = CTB0_IS_USED(n),                                                  \
+		 .cfgOpamp0 = 0,                                                                   \
+		 .gainOpamp0 = CTB_OA_GAIN(CTB0_NODE(n), 0),                                       \
+		 .enableOpamp1 = CTB0_IS_USED(n),                                                  \
+		 .cfgOpamp1 = 1,                                                                   \
+		 .gainOpamp1 = CTB_OA_GAIN(CTB0_NODE(n), 1)},                                      \
+	};                                                                                         \
+	static cy_stc_autanalog_stt_ctb_t ifx_autanalog_ctb1_stt_##n[] = {                         \
+		{.unlock = CTB1_IS_USED(n),                                                        \
+		 .enableOpamp0 = CTB1_IS_USED(n),                                                  \
+		 .cfgOpamp0 = 0,                                                                   \
+		 .gainOpamp0 = CTB_OA_GAIN(CTB1_NODE(n), 0),                                       \
+		 .enableOpamp1 = CTB1_IS_USED(n),                                                  \
+		 .cfgOpamp1 = 1,                                                                   \
+		 .gainOpamp1 = CTB_OA_GAIN(CTB1_NODE(n), 1)},                                      \
+		{.unlock = CTB1_IS_USED(n),                                                        \
+		 .enableOpamp0 = CTB1_IS_USED(n),                                                  \
+		 .cfgOpamp0 = 0,                                                                   \
+		 .gainOpamp0 = CTB_OA_GAIN(CTB1_NODE(n), 0),                                       \
+		 .enableOpamp1 = CTB1_IS_USED(n),                                                  \
+		 .cfgOpamp1 = 1,                                                                   \
+		 .gainOpamp1 = CTB_OA_GAIN(CTB1_NODE(n), 1)},                                      \
+		{.unlock = CTB1_IS_USED(n),                                                        \
+		 .enableOpamp0 = CTB1_IS_USED(n),                                                  \
+		 .cfgOpamp0 = 0,                                                                   \
+		 .gainOpamp0 = CTB_OA_GAIN(CTB1_NODE(n), 0),                                       \
+		 .enableOpamp1 = CTB1_IS_USED(n),                                                  \
+		 .cfgOpamp1 = 1,                                                                   \
+		 .gainOpamp1 = CTB_OA_GAIN(CTB1_NODE(n), 1)},                                      \
+		{.unlock = CTB1_IS_USED(n),                                                        \
+		 .enableOpamp0 = CTB1_IS_USED(n),                                                  \
+		 .cfgOpamp0 = 0,                                                                   \
+		 .gainOpamp0 = CTB_OA_GAIN(CTB1_NODE(n), 0),                                       \
+		 .enableOpamp1 = CTB1_IS_USED(n),                                                  \
+		 .cfgOpamp1 = 1,                                                                   \
+		 .gainOpamp1 = CTB_OA_GAIN(CTB1_NODE(n), 1)},                                      \
+	};                                                                                         \
+	static cy_stc_autanalog_stt_dac_t ifx_autanalog_dac0_stt_##n[] = {                     \
+		{.unlock = DAC0_IS_USED(n), .enable = DAC0_IS_USED(n),                             \
+		 .channel = IFX_AUTANALOG_DEFAULT_DAC_CHAN},                                       \
+		{.unlock = DAC0_IS_USED(n), .enable = DAC0_IS_USED(n),                             \
+		 .trigger = DAC0_IS_USED(n), .channel = IFX_AUTANALOG_DEFAULT_DAC_CHAN},           \
+		{.unlock = DAC0_IS_USED(n), .enable = DAC0_IS_USED(n),                             \
+		 .channel = IFX_AUTANALOG_DEFAULT_DAC_CHAN},                                       \
+		{.unlock = DAC0_IS_USED(n), .enable = DAC0_IS_USED(n),                             \
+		 .channel = IFX_AUTANALOG_DEFAULT_DAC_CHAN},                                       \
+	};                                                                                     \
+	static cy_stc_autanalog_stt_dac_t ifx_autanalog_dac1_stt_##n[] = {                     \
+		{.unlock = DAC1_IS_USED(n), .enable = DAC1_IS_USED(n),                             \
+		 .channel = IFX_AUTANALOG_DEFAULT_DAC_CHAN},                                       \
+		{.unlock = DAC1_IS_USED(n), .enable = DAC1_IS_USED(n),                             \
+		 .trigger = DAC1_IS_USED(n), .channel = IFX_AUTANALOG_DEFAULT_DAC_CHAN},           \
+		{.unlock = DAC1_IS_USED(n), .enable = DAC1_IS_USED(n),                             \
+		 .channel = IFX_AUTANALOG_DEFAULT_DAC_CHAN},                                       \
+		{.unlock = DAC1_IS_USED(n), .enable = DAC1_IS_USED(n),                             \
+		 .channel = IFX_AUTANALOG_DEFAULT_DAC_CHAN},                                       \
+	};                                                                                     \
+	static cy_stc_autanalog_stt_prb_t ifx_autanalog_prb_stt_##n[] = {                          \
+		{.unlock = PRB_IS_USED(n), .prbVref0Fw = true, .prbVref1Fw = true},                \
+		{.unlock = PRB_IS_USED(n), .prbVref0Fw = true, .prbVref1Fw = true},                \
+		{.unlock = PRB_IS_USED(n), .prbVref0Fw = true, .prbVref1Fw = true},                \
+		{.unlock = PRB_IS_USED(n), .prbVref0Fw = true, .prbVref1Fw = true},                \
+	};                                                                                         \
+	static cy_stc_autanalog_stt_t ifx_autanalog_stt_##n[] = {                                  \
+		{.ac = &ifx_autanalog_ac_stt_##n[0],                                               \
+		 .ctb = {&ifx_autanalog_ctb0_stt_##n[0], &ifx_autanalog_ctb1_stt_##n[0]},          \
+		 .prb = &ifx_autanalog_prb_stt_##n[0],                                             \
+		 .ptcomp = {&ifx_autanalog_ptcomp0_stt_##n[0]},                                    \
+		 .sar = {&ifx_autanalog_sar_stt_##n[0]}},                                          \
+		{.ac = &ifx_autanalog_ac_stt_##n[1],                                               \
+		 .ctb = {&ifx_autanalog_ctb0_stt_##n[1], &ifx_autanalog_ctb1_stt_##n[1]},          \
+		 .dac = {&ifx_autanalog_dac0_stt_##n[1], &ifx_autanalog_dac1_stt_##n[1]},          \
+		 .prb = &ifx_autanalog_prb_stt_##n[1],                                             \
+		 .ptcomp = {&ifx_autanalog_ptcomp0_stt_##n[1]},                                    \
+		 .sar = {&ifx_autanalog_sar_stt_##n[1]}},                                          \
+		{.ac = &ifx_autanalog_ac_stt_##n[2],                                               \
+		 .ctb = {&ifx_autanalog_ctb0_stt_##n[2], &ifx_autanalog_ctb1_stt_##n[2]},          \
+		 .prb = &ifx_autanalog_prb_stt_##n[2],                                             \
+		 .ptcomp = {&ifx_autanalog_ptcomp0_stt_##n[2]},                                    \
+		 .sar = {&ifx_autanalog_sar_stt_##n[2]}},                                          \
+		{.ac = &ifx_autanalog_ac_stt_##n[3],                                               \
+		 .prb = &ifx_autanalog_prb_stt_##n[3],                                             \
+		 .ctb = {&ifx_autanalog_ctb0_stt_##n[3], &ifx_autanalog_ctb1_stt_##n[3]},          \
+		 .ptcomp = {&ifx_autanalog_ptcomp0_stt_##n[3]},                                    \
+		 .sar = {&ifx_autanalog_sar_stt_##n[3]}},                                          \
 	};
 
 /* ===== Advanced mode: STT from DT ac-states phandle list ===== */
@@ -156,6 +370,18 @@ static const uint32_t ifx_autanalog_intr_masks[IFX_AUTANALOG_PERIPH_COUNT] = {
 		.enable = (bool)DT_PROP(AC_STATE_NODE(n, i), sar_enable),                      \
 		.trigger = (bool)DT_PROP(AC_STATE_NODE(n, i), sar_trigger),                    \
 		.entryState = (uint8_t)DT_PROP(AC_STATE_NODE(n, i), sar_entry_state),          \
+	}
+
+/** Build one cy_stc_autanalog_stt_prb_t initialiser from a state child node */
+#define IFX_AUTANALOG_PRB_STT_ENTRY(i, n)                                                      \
+	{                                                                                          \
+		.unlock = (bool)DT_PROP(AC_STATE_NODE(n, i), prb_unlock),                          \
+		.prbVref0Fw = (bool)DT_PROP(AC_STATE_NODE(n, i), prb_vref0_fw),                    \
+		.prbVref0Tap =                                                                     \
+			(cy_en_autanalog_prb_tap_t)DT_PROP(AC_STATE_NODE(n, i), prb_vref0_tap),    \
+		.prbVref1Fw = (bool)DT_PROP(AC_STATE_NODE(n, i), prb_vref1_fw),                    \
+		.prbVref1Tap =                                                                     \
+			(cy_en_autanalog_prb_tap_t)DT_PROP(AC_STATE_NODE(n, i), prb_vref1_tap),    \
 	}
 
 /** Build one cy_stc_autanalog_stt_ctb_t initialiser for CTB0 */
@@ -224,7 +450,7 @@ static const uint32_t ifx_autanalog_intr_masks[IFX_AUTANALOG_PERIPH_COUNT] = {
 #define IFX_AUTANALOG_STT_ENTRY(i, n)                                                          \
 	{                                                                                      \
 		.ac = &ifx_autanalog_ac_stt_##n[i],                                            \
-		.prb = NULL,                                                                   \
+		.prb = &ifx_autanalog_prb_stt_##n[i],                                          \
 		.ctb = {&ifx_autanalog_ctb0_stt_##n[i], &ifx_autanalog_ctb1_stt_##n[i]},       \
 		.ptcomp = {&ifx_autanalog_ptcomp0_stt_##n[i]},                                 \
 		.dac = {&ifx_autanalog_dac0_stt_##n[i], &ifx_autanalog_dac1_stt_##n[i]},       \
@@ -246,6 +472,8 @@ static const uint32_t ifx_autanalog_intr_masks[IFX_AUTANALOG_PERIPH_COUNT] = {
 		LISTIFY(NUM_STT_STATES(n), IFX_AUTANALOG_DAC0_STT_ENTRY, (,), n)};             \
 	static cy_stc_autanalog_stt_dac_t ifx_autanalog_dac1_stt_##n[] = {                     \
 		LISTIFY(NUM_STT_STATES(n), IFX_AUTANALOG_DAC1_STT_ENTRY, (,), n)};             \
+	static cy_stc_autanalog_stt_prb_t ifx_autanalog_prb_stt_##n[] = {                     \
+		LISTIFY(NUM_STT_STATES(n), IFX_AUTANALOG_PRB_STT_ENTRY, (,), n)};              \
 	static cy_stc_autanalog_stt_t ifx_autanalog_stt_##n[] = {                              \
 		LISTIFY(NUM_STT_STATES(n), IFX_AUTANALOG_STT_ENTRY, (,), n)};
 
@@ -264,6 +492,7 @@ struct ifx_autanalog_child {
 
 struct ifx_autanalog_mfd_data {
 	struct ifx_autanalog_child children[IFX_AUTANALOG_PERIPH_COUNT];
+	struct ifx_autanalog_child fifo_child;
 	uint32_t interrupt_mask;
 };
 
@@ -291,6 +520,15 @@ void ifx_autanalog_set_irq_handler(const struct device *dev, const struct device
 	/* Enable the interrupt mask for this peripheral */
 	data->interrupt_mask |= ifx_autanalog_intr_masks[periph];
 	Cy_AutAnalog_SetInterruptMask(data->interrupt_mask);
+}
+
+void ifx_autanalog_set_fifo_irq_handler(const struct device *dev, const struct device *child_dev,
+					ifx_autanalog_child_isr_t handler)
+{
+	struct ifx_autanalog_mfd_data *data = dev->data;
+
+	data->fifo_child.dev = child_dev;
+	data->fifo_child.isr = handler;
 }
 
 int ifx_autanalog_start_autonomous_control(const struct device *dev)
@@ -331,6 +569,21 @@ static void autanalog_mfd_isr(const struct device *dev)
 	}
 
 	Cy_AutAnalog_ClearInterrupt(int_source);
+}
+
+/**
+ * @brief FIFO ISR for the AutAnalog subsystem
+ *
+ * The FIFO has a dedicated interrupt line. This ISR dispatches to the
+ * registered FIFO handler (typically the SAR ADC driver).
+ */
+static void autanalog_mfd_fifo_isr(const struct device *dev)
+{
+	struct ifx_autanalog_mfd_data *data = dev->data;
+
+	if (data->fifo_child.isr != NULL) {
+		data->fifo_child.isr(data->fifo_child.dev);
+	}
 }
 
 /**
@@ -448,11 +701,31 @@ int ifx_autanalog_init(void)
 	static void ifx_autanalog_mfd_config_func_##n(const struct device *dev)                \
 	{                                                                                      \
 		ARG_UNUSED(dev);                                                               \
-		IRQ_CONNECT(DT_INST_IRQN(n), DT_INST_IRQ(n, priority), autanalog_mfd_isr,      \
-			    DEVICE_DT_INST_GET(n), 0);                                         \
-		irq_enable(DT_INST_IRQN(n));                                                   \
+		IRQ_CONNECT(DT_INST_IRQ_BY_NAME(n, autanalog, irq),                             \
+			    DT_INST_IRQ_BY_NAME(n, autanalog, priority),                        \
+			    autanalog_mfd_isr, DEVICE_DT_INST_GET(n), 0);                       \
+		irq_enable(DT_INST_IRQ_BY_NAME(n, autanalog, irq));                           \
+		IF_ENABLED(DT_INST_IRQ_HAS_NAME(n, autanalog_fifo), (                       \
+			IRQ_CONNECT(DT_INST_IRQ_BY_NAME(n, autanalog_fifo, irq),               \
+				    DT_INST_IRQ_BY_NAME(n, autanalog_fifo, priority),           \
+				    autanalog_mfd_fifo_isr, DEVICE_DT_INST_GET(n), 0);          \
+			irq_enable(DT_INST_IRQ_BY_NAME(n, autanalog_fifo, irq));               \
+		))                                                                      \
 	}
 
 DT_INST_FOREACH_STATUS_OKAY(IFX_AUTANALOG_MFD_INIT)
 
 /* clang-format on */
+
+/**
+ * Start the Autonomous Controller after all child drivers have initialized
+ * and loaded their configurations.
+ */
+static int ifx_autanalog_start_ac(void)
+{
+	Cy_AutAnalog_StartAutonomousControl();
+	LOG_DBG("AutAnalog AC started");
+	return 0;
+}
+
+SYS_INIT(ifx_autanalog_start_ac, POST_KERNEL, CONFIG_MFD_INFINEON_AUTANALOG_AC_START_PRIORITY);

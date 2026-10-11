@@ -18,7 +18,7 @@
 #include <zephyr/dt-bindings/sensor/it8xxx2_vcmp.h>
 #include <zephyr/dt-bindings/sensor/it8xxx2_tach.h>
 #include <zephyr/dt-bindings/gpio/gpio.h>
-#include "ite/it8xxx2-wuc-map.dtsi"
+#include <ite/it8xxx2-wuc-map.dtsi>
 
 / {
 	#address-cells = <1>;
@@ -27,6 +27,7 @@
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
+		timebase-frequency = <32768>;
 
 		cpu0: cpu@0 {
 			compatible = "ite,riscv-ite", "riscv";
@@ -64,12 +65,16 @@
 			reg = <0x00f01000 0x100>;
 			#address-cells = <1>;
 			#size-cells = <1>;
+			ranges;
 
 			flash0: flash@80000000 {
 				compatible = "soc-nv-flash";
 				reg = <0x80000000 DT_SIZE_M(1)>;
+				ranges = <0 0x80000000 DT_SIZE_M(1)>;
 				erase-block-size = <4096>;
 				write-block-size = <4>;
+				#address-cells = <1>;
+				#size-cells = <1>;
 			};
 		};
 

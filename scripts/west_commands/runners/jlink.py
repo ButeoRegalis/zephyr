@@ -58,7 +58,7 @@ class JLinkBinaryRunner(ZephyrBinaryRunner):
                  rtt_port=DEFAULT_JLINK_RTT_PORT,
                  rtt_channel=None,
                  tui=False, tool_opt=None, dev_id_type=None, batch=False,
-                 pre_script_cmds=None):
+                 pre_script_cmds=None, gdb_init=None):
         super().__init__(cfg)
         self.file = cfg.file
         self.file_type = cfg.file_type
@@ -88,6 +88,7 @@ class JLinkBinaryRunner(ZephyrBinaryRunner):
         self.dev_id_type = dev_id_type
         self.is_batch = batch
         self.pre_script_cmds = pre_script_cmds
+        self.gdb_init = gdb_init or []
 
         self.tool_opt = []
         if tool_opt is not None:
@@ -127,7 +128,7 @@ class JLinkBinaryRunner(ZephyrBinaryRunner):
     def capabilities(cls):
         return RunnerCaps(commands={'flash', 'debug', 'debugserver', 'attach', 'rtt', 'reset'},
                           dev_id=True, flash_addr=True, erase=True, reset=True, reset_types=True,
-                          tool_opt=True, file=True, rtt=True, batch_debug=True)
+                          tool_opt=True, file=True, rtt=True, batch_debug=True, gdb_init=True)
 
     @classmethod
     def dev_id_help(cls) -> str:
@@ -237,7 +238,8 @@ class JLinkBinaryRunner(ZephyrBinaryRunner):
                                  tui=args.tui, tool_opt=args.tool_opt,
                                  dev_id_type=args.dev_id_type,
                                  batch=args.batch,
-                                 pre_script_cmds=args.pre_script_cmds)
+                                 pre_script_cmds=args.pre_script_cmds,
+                                 gdb_init=args.gdb_init)
 
     def print_gdbserver_message(self):
         if not self.thread_info_enabled:
@@ -418,6 +420,12 @@ class JLinkBinaryRunner(ZephyrBinaryRunner):
 
                 self.run_telnet_client('localhost', self.rtt_port, sock,
                                        send_on_connect=rtt_config)
+            except ValueError as e:
+                # ValueError exception is thrown, if PC can't connect to the J-Link and
+                # we still try to open a socket to it.
+                # Silently capture the exception, the prompt from JLinkExe already
+                # contains good message about what happened.
+                self.logger.debug(f'ValueError during RTT connection: {e}')
             except OSError as e:
                 self.logger.error(
                     f'Failed to connect to the localhost:{self.rtt_port} socket: {e}',
@@ -425,6 +433,9 @@ class JLinkBinaryRunner(ZephyrBinaryRunner):
             finally:
                 server_proc.terminate()
                 server_proc.wait()
+                # Print a single newline so that terminal prompt appears on a separate
+                # line.
+                print()
         else:
             if self.gdb_cmd is None:
                 raise ValueError('Cannot debug; gdb is missing')
@@ -446,11 +457,16 @@ class JLinkBinaryRunner(ZephyrBinaryRunner):
                 client_cmd += ['-ex', 'monitor halt',
                                '-ex', 'monitor reset',
                                '-ex', 'load']
+            if command in ('debug', 'attach'):
+                if self.reset and not self.is_batch:
+                    client_cmd += ['-ex', 'monitor reset']
+                # Run the user's commands after the last reset, so that nothing
+                # discards their effect, and while the target is still halted.
+                client_cmd += self.gdb_ex_args(self.gdb_init)
                 if self.is_batch:
                     client_cmd += ['-ex', 'monitor go', '-ex', 'disconnect', '-ex', 'quit']
-                elif self.reset:
-                    client_cmd += ['-ex', 'monitor reset']
             if command == 'reset':
+                # A fixed sequence with no user session, so no gdb_init here.
                 client_cmd += [
                     '-ex', 'monitor halt',
                     '-ex', 'monitor reset',

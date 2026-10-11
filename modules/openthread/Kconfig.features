@@ -43,7 +43,7 @@ config OPENTHREAD_BACKBONE_ROUTER_MULTICAST_ROUTING
 	bool "BBR MR support"
 
 config OPENTHREAD_BLE_TCAT
-	bool "BLE TCAT support"
+	bool "BLE TCAT support [EXPERIMENTAL]"
 	select EXPERIMENTAL
 
 config OPENTHREAD_BORDER_AGENT
@@ -106,7 +106,7 @@ config OPENTHREAD_COMMISSIONER
 	help
 	  Enable commissioner capability in OpenThread stack. Note, that DTLS
 	  handshake used in the commissioning procedure requires a larger
-	  mbedTLS heap than the default value. A minimum recommended value of
+	  Mbed TLS heap than the default value. A minimum recommended value of
 	  CONFIG_MBEDTLS_HEAP_SIZE for the commissioning is 10KB.
 
 config OPENTHREAD_CSL_DEBUG
@@ -221,7 +221,7 @@ config OPENTHREAD_JOINER
 	help
 	  Enable joiner capability in OpenThread stack. Note, that DTLS
 	  handshake used in the commissioning procedure requires a larger
-	  mbedTLS heap than the default value. A minimum recommended value of
+	  Mbed TLS heap than the default value. A minimum recommended value of
 	  CONFIG_MBEDTLS_HEAP_SIZE for the commissioning is 10KB.
 
 config OPENTHREAD_COMMISSIONER_JOINER
@@ -266,7 +266,7 @@ config OPENTHREAD_MESSAGE_USE_HEAP
 	bool "Heap allocator for message buffers"
 
 config OPENTHREAD_MLE_LONG_ROUTES
-	bool "MLE long routes extension (experimental)"
+	bool "MLE long routes extension [EXPERIMENTAL]"
 	select EXPERIMENTAL
 	help
 	  Enable MLE long routes extension (experimental, breaks Thread conformance)

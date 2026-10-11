@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2025-2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,7 +14,9 @@
 		watchdog0 = &watchdog0;
 
 		/* Sensor Aliases */
+		ambient-temp0 = &sht4x;
 		pressure-sensor = &dps368;
+		accel0 = &bosch_bmi270;
 	};
 
 	leds {
@@ -61,18 +63,22 @@
 	status = "okay";
 };
 
+zephyr_udc0: &usbhs {
+	status = "okay";
+};
+
 uart2: &scb2 {
 	compatible = "infineon,uart";
 	status = "okay";
 	current-speed = <115200>;
 
-	clocks = <&peri0_group1_16bit_0>;
+	clocks = <&peri0_group1_16bit_1>;
 
 	pinctrl-0 = <&p6_7_scb2_uart_tx &p6_5_scb2_uart_rx>;
 	pinctrl-names = "default";
 };
 
-&peri0_group1_16bit_0 {
+&peri0_group1_16bit_1 {
 	status = "okay";
 	clock-div = <1>;
 };
@@ -86,13 +92,20 @@ i2c0: &scb0 {
 	pinctrl-0 = <&p8_0_scb0_i2c_scl &p8_1_scb0_i2c_sda>;
 	pinctrl-names = "default";
 
+	bosch_bmi270: bmi270@68 {
+		compatible = "bosch,bmi270";
+		reg = <0x68>;
+		status = "okay";
+		irq-gpios = <&gpio_prt7 7 GPIO_ACTIVE_HIGH>, <&gpio_prt6 6 GPIO_ACTIVE_HIGH>;
+	};
+
 	dps368: dps368@77 {
 		compatible = "infineon,dps368", "infineon,dps310";
 		status = "okay";
 		reg = <0x77>;
 	};
 
-	sht4x@44 {
+	sht4x: sht4x@44 {
 		status = "okay";
 		compatible = "sensirion,sht4x";
 		reg = <0x44>;
@@ -110,6 +123,10 @@ i2c0: &scb0 {
 };
 
 &gpio_prt2 {
+	status = "okay";
+};
+
+&gpio_prt6 {
 	status = "okay";
 };
 

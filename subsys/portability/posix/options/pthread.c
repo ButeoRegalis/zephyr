@@ -84,14 +84,13 @@ BUILD_ASSERT(CONFIG_POSIX_PTHREAD_ATTR_STACKSIZE_BITS + CONFIG_POSIX_PTHREAD_ATT
 
 static void posix_thread_recycle(void);
 
-__pinned_data
 static sys_dlist_t posix_thread_q[] = {
 	SYS_DLIST_STATIC_INIT(&posix_thread_q[POSIX_THREAD_READY_Q]),
 	SYS_DLIST_STATIC_INIT(&posix_thread_q[POSIX_THREAD_RUN_Q]),
 	SYS_DLIST_STATIC_INIT(&posix_thread_q[POSIX_THREAD_DONE_Q]),
 };
 
-static __pinned_bss struct posix_thread posix_thread_pool[CONFIG_POSIX_THREAD_THREADS_MAX];
+static struct posix_thread posix_thread_pool[CONFIG_POSIX_THREAD_THREADS_MAX];
 
 static SYS_SEM_DEFINE(pthread_pool_lock, 1, 1);
 static int pthread_concurrency;
@@ -351,13 +350,14 @@ int pthread_attr_setstack(pthread_attr_t *_attr, void *stackaddr, size_t stacksi
 		return EACCES;
 	}
 
-	if (!__attr_is_initialized(attr) || stacksize == 0 || stacksize < PTHREAD_STACK_MIN ||
-	    stacksize > PTHREAD_STACK_MAX) {
+	if (!__attr_is_initialized(attr) || (stacksize == 0) ||
+	    (PTHREAD_STACK_MIN > 0 && stacksize < PTHREAD_STACK_MIN) ||
+	    (stacksize > PTHREAD_STACK_MAX)) {
 		LOG_DBG("Invalid stacksize %zu", stacksize);
 		return EINVAL;
 	}
 
-	if (attr->stack != NULL) {
+	if (attr->stack != NULL && attr->stack != stackaddr) {
 		ret = k_thread_stack_free(attr->stack);
 		if (ret == 0) {
 			LOG_DBG("Freed attr %p thread stack %zu@%p", _attr,
@@ -470,7 +470,6 @@ static void posix_thread_finalize(struct posix_thread *t, void *retval)
 	sys_snode_t *node_l, *node_s;
 	pthread_key_obj *key_obj;
 	pthread_thread_data *thread_spec_data;
-	sys_snode_t *node_key_data, *node_key_data_s, *node_key_data_prev = NULL;
 	struct pthread_key_data *key_data;
 
 	SYS_SLIST_FOR_EACH_NODE_SAFE(&t->key_list, node_l, node_s) {
@@ -482,22 +481,10 @@ static void posix_thread_finalize(struct posix_thread *t, void *retval)
 			}
 
 			SYS_SEM_LOCK(&pthread_key_lock) {
-				SYS_SLIST_FOR_EACH_NODE_SAFE(
-					&key_obj->key_data_l,
-					node_key_data,
-					node_key_data_s) {
-					key_data = (struct pthread_key_data *)node_key_data;
-					if (&key_data->thread_data == thread_spec_data) {
-						sys_slist_remove(
-							&key_obj->key_data_l,
-							node_key_data_prev,
-							node_key_data
-						);
-						k_free(key_data);
-						break;
-					}
-					node_key_data_prev = node_key_data;
-				}
+				key_data = CONTAINER_OF(thread_spec_data, struct pthread_key_data,
+							thread_data);
+				sys_dlist_remove(&key_data->node);
+				k_free(key_data);
 			}
 		}
 	}
@@ -585,7 +572,7 @@ static void posix_thread_recycle(void)
  *
  * See IEEE 1003.1
  */
-int pthread_create(pthread_t *th, const pthread_attr_t *_attr, void *(*threadroutine)(void *),
+int pthread_create(pthread_t *th, const pthread_attr_t *_attr, void *(*threadroutine)(void *arg),
 		   void *arg)
 {
 	int err;
@@ -1019,6 +1006,14 @@ int pthread_once(pthread_once_t *once, void (*init_func)(void))
 		return EINVAL;
 	}
 
+	/* Nothing to do once the flag is set: it is never cleared, and since it is
+	 * set before init_func() is called, taking the lock would not make this
+	 * caller wait for initialization to finish anyway.
+	 */
+	if (_once->flag) {
+		return 0;
+	}
+
 	SYS_SEM_LOCK(&pthread_pool_lock) {
 		if (!_once->flag) {
 			run_init_func = true;
@@ -1310,8 +1305,9 @@ int pthread_attr_setstacksize(pthread_attr_t *_attr, size_t stacksize)
 	void *new_stack;
 	struct posix_thread_attr *attr = (struct posix_thread_attr *)_attr;
 
-	if (!__attr_is_initialized(attr) || stacksize == 0 || stacksize < PTHREAD_STACK_MIN ||
-	    stacksize > PTHREAD_STACK_MAX) {
+	if (!__attr_is_initialized(attr) || (stacksize == 0) ||
+	    (PTHREAD_STACK_MIN > 0 && stacksize < PTHREAD_STACK_MIN) ||
+	    (stacksize > PTHREAD_STACK_MAX)) {
 		return EINVAL;
 	}
 

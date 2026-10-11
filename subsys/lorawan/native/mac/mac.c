@@ -32,7 +32,7 @@
 #include <zephyr/kernel.h>
 
 #include "mac_internal.h"
-#include "radio.h"
+#include <radio.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(lorawan_native_mac, CONFIG_LORAWAN_LOG_LEVEL);
@@ -95,7 +95,8 @@ int mac_do_tx_rx(struct lwan_ctx *ctx, const struct mac_tx_params *params)
 	int64_t tx_done_time;
 	int ret;
 
-	ret = region->get_tx_params(params->tx_dr_idx, &tx_dr, &tx_power);
+	ret = region->get_tx_params(params->tx_dr_idx, ctx->mac.tx_power_idx,
+				    &tx_dr, &tx_power);
 	if (ret != 0) {
 		return ret;
 	}
@@ -118,7 +119,7 @@ int mac_do_tx_rx(struct lwan_ctx *ctx, const struct mac_tx_params *params)
 	}
 
 	if (params->post_tx != NULL) {
-		params->post_tx(ctx);
+		params->post_tx(ctx, params->user_data);
 	}
 
 	/* --- RX1 window --- */
@@ -158,17 +159,135 @@ int mac_do_tx_rx(struct lwan_ctx *ctx, const struct mac_tx_params *params)
 	return -ETIMEDOUT;
 }
 
+static void mac_do_set_datarate(struct lwan_ctx *ctx,
+				const struct lwan_req *req)
+{
+	const struct lwan_set_datarate_req *dr_req = req->data;
+	struct lwan_dr_params p;
+	int8_t power;
+	int ret;
+
+	if (ctx->mac.adr_enabled) {
+		engine_signal_result(req, -EINVAL);
+		return;
+	}
+
+	if (ctx->region == NULL ||
+	    ctx->region->get_tx_params((uint8_t)dr_req->dr,
+				       ctx->mac.tx_power_idx,
+				       &p, &power) != 0) {
+		ret = -EINVAL;
+	} else {
+		ctx->current_dr = dr_req->dr;
+		ret = 0;
+	}
+
+	engine_signal_result(req, ret);
+}
+
+static void mac_do_enable_adr(struct lwan_ctx *ctx,
+			      const struct lwan_req *req)
+{
+	const struct lwan_enable_adr_req *adr_req = req->data;
+
+	ctx->mac.adr_enabled = adr_req->enable;
+	engine_signal_result(req, 0);
+}
+
+static void mac_do_set_conf_msg_tries(struct lwan_ctx *ctx,
+				      const struct lwan_req *req)
+{
+	const struct lwan_set_conf_msg_tries_req *tries_req = req->data;
+
+	ctx->conf_tries = tries_req->tries;
+	engine_signal_result(req, 0);
+}
+
+static void mac_do_set_channels_mask(struct lwan_ctx *ctx,
+				     const struct lwan_req *req)
+{
+	const struct lwan_set_channels_mask_req *mask_req = req->data;
+	size_t min_words = DIV_ROUND_UP(ctx->channel_count, 16);
+	int ret = 0;
+
+	if (mask_req->channels_mask_size < min_words) {
+		ret = -EINVAL;
+		goto signal_result;
+	}
+
+	for (size_t i = 0; i < ctx->channel_count; i++) {
+		uint16_t word = mask_req->channels_mask[i / 16];
+		bool enabled = (word & BIT(i % 16)) != 0;
+
+		ctx->channels[i].enabled = enabled;
+	}
+
+signal_result:
+	engine_signal_result(req, ret);
+}
+
+static void mac_do_link_check(struct lwan_ctx *ctx,
+			      const struct lwan_req *req)
+{
+	const struct lwan_link_check_req *lc_req = req->data;
+	struct lwan_send_req send_req;
+	struct lwan_req send_msg;
+
+	/* LinkCheckReq rides in the FOpts of the next uplink */
+	ctx->mac.link_check_pending = true;
+
+	if (!lc_req->force_request) {
+		engine_signal_result(req, 0);
+		return;
+	}
+
+	/* Trigger an empty unconfirmed uplink so the queued LinkCheckReq
+	 * goes out now rather than waiting for the next application send.
+	 * mac_do_send() signals the request itself.
+	 */
+	send_req = (struct lwan_send_req){
+		.data = NULL,
+		.len = 0,
+		.port = 0,
+		.type = LORAWAN_MSG_UNCONFIRMED,
+	};
+	send_msg = (struct lwan_req){
+		.type = LWAN_REQ_SEND,
+		.data = &send_req,
+		.done = req->done,
+		.result = req->result,
+	};
+
+	mac_do_send(ctx, &send_msg);
+}
+
 void mac_process_req(struct lwan_ctx *ctx, const struct lwan_req *req)
 {
 	switch (req->type) {
 	case LWAN_REQ_JOIN:
-		mac_do_join(ctx, req->data);
+		mac_do_join(ctx, req);
 		break;
 	case LWAN_REQ_SEND:
-		mac_do_send(ctx, req->data);
+		mac_do_send(ctx, req);
+		break;
+	case LWAN_REQ_SET_DATARATE:
+		mac_do_set_datarate(ctx, req);
+		break;
+	case LWAN_REQ_ENABLE_ADR:
+		mac_do_enable_adr(ctx, req);
+		break;
+	case LWAN_REQ_SET_CONF_MSG_TRIES:
+		mac_do_set_conf_msg_tries(ctx, req);
+		break;
+	case LWAN_REQ_SET_CHANNELS_MASK:
+		mac_do_set_channels_mask(ctx, req);
+		break;
+	case LWAN_REQ_LINK_CHECK:
+		mac_do_link_check(ctx, req);
 		break;
 	default:
 		LOG_WRN("Unknown request type: %d", req->type);
+		engine_signal_result(req, -ENOTSUP);
 		break;
 	}
 }

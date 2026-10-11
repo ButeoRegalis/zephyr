@@ -14,8 +14,6 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/kernel.h>
 
-#include "psa/crypto.h"
-
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
@@ -25,7 +23,7 @@
 #include <zephyr/bluetooth/classic/goep.h>
 #include <zephyr/bluetooth/classic/pbap.h>
 
-#include "host/conn_internal.h"
+#include <host/conn_internal.h>
 #include "l2cap_br_internal.h"
 #include "rfcomm_internal.h"
 #include "obex_internal.h"
@@ -284,9 +282,11 @@ static int bt_pbap_transport_connect(struct bt_conn *conn, struct bt_pbap_pce *p
 
 	if (channel != 0 && psm == 0) {
 		pbap_pce->_goep.transport_ops = &pbap_rfcomm_transport_ops;
+		BT_GOEP_INIT_V1(&pbap_pce->_goep, &pbap_pce->_goep_transport.v1);
 		err = bt_goep_transport_rfcomm_connect(conn, &pbap_pce->_goep, channel);
 	} else {
 		pbap_pce->_goep.transport_ops = &pbap_l2cap_transport_ops;
+		BT_GOEP_INIT_V2(&pbap_pce->_goep, &pbap_pce->_goep_transport.v2);
 		err = bt_goep_transport_l2cap_connect(conn, &pbap_pce->_goep, psm);
 	}
 
@@ -654,7 +654,7 @@ static int bt_pbap_pce_get(struct bt_pbap_pce *pbap_pce, struct net_buf *buf, co
 			return -EINVAL;
 		}
 
-		if (pbap_pce->_goep._goep_v2 && pbap_pce->_rsp_cb == NULL) {
+		if (pbap_pce->_goep.v2 != NULL && pbap_pce->_rsp_cb == NULL) {
 			err = bt_pbap_check_srm(buf);
 			if (err != 0) {
 				LOG_ERR("SRM check failed %d", err);
@@ -813,106 +813,6 @@ struct net_buf *bt_pbap_pce_create_pdu(struct bt_pbap_pce *pbap_pce, struct net_
 struct net_buf *bt_pbap_pse_create_pdu(struct bt_pbap_pse *pbap_pse, struct net_buf_pool *pool)
 {
 	return bt_pbap_create_pdu(&pbap_pse->_goep, pool);
-}
-
-int bt_pbap_calculate_nonce(const uint8_t *pwd, uint8_t nonce[BT_OBEX_CHALLENGE_TAG_NONCE_LEN])
-{
-	int64_t timestamp = k_uptime_get();
-	uint8_t hash_input[PBAP_PWD_MAX_LENGTH + 1U + sizeof(timestamp)];
-	size_t len;
-	uint16_t pwd_len;
-	int err;
-
-	if (pwd == NULL) {
-		LOG_WRN("no available password");
-		return -EINVAL;
-	}
-
-	if (nonce == NULL) {
-		LOG_WRN("no available nonce");
-		return -EINVAL;
-	}
-
-	pwd_len = strlen(pwd);
-	if (pwd_len == 0 || pwd_len > PBAP_PWD_MAX_LENGTH) {
-		LOG_ERR("Password is invalid");
-		return -EINVAL;
-	}
-
-	memcpy(hash_input, &timestamp, sizeof(timestamp));
-	hash_input[sizeof(timestamp)] = ':';
-	memcpy(hash_input + sizeof(timestamp) + 1U, pwd, pwd_len);
-	err = psa_hash_compute(PSA_ALG_MD5, (const unsigned char *)hash_input,
-			       sizeof(timestamp) + 1U + pwd_len, nonce,
-			       BT_OBEX_CHALLENGE_TAG_NONCE_LEN, &len);
-	if (err != 0) {
-		LOG_WRN("Generate nonce failed %d", err);
-		return err;
-	}
-	return 0;
-}
-
-int bt_pbap_calculate_rsp_digest(const uint8_t *pwd,
-				 const uint8_t nonce[BT_OBEX_CHALLENGE_TAG_NONCE_LEN],
-				 uint8_t rsp_digest[BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN])
-{
-	uint8_t hash_input[PBAP_PWD_MAX_LENGTH + BT_OBEX_CHALLENGE_TAG_NONCE_LEN + 1U];
-	size_t len;
-	uint16_t pwd_len;
-	int err;
-
-	if (pwd == NULL) {
-		LOG_WRN("no available password");
-		return -EINVAL;
-	}
-
-	if (nonce == NULL) {
-		LOG_WRN("no available nonce");
-		return -EINVAL;
-	}
-
-	if (rsp_digest == NULL) {
-		LOG_WRN("no available rsp_digest");
-		return -EINVAL;
-	}
-
-	pwd_len = strlen(pwd);
-	if (pwd_len == 0 || pwd_len > PBAP_PWD_MAX_LENGTH) {
-		LOG_ERR("Password is invalid");
-		return -EINVAL;
-	}
-
-	memcpy(hash_input, nonce, BT_OBEX_CHALLENGE_TAG_NONCE_LEN);
-	hash_input[BT_OBEX_CHALLENGE_TAG_NONCE_LEN] = ':';
-	memcpy(hash_input + BT_OBEX_CHALLENGE_TAG_NONCE_LEN + 1U, pwd, pwd_len);
-
-	err = psa_hash_compute(PSA_ALG_MD5, (const unsigned char *)hash_input,
-			       BT_OBEX_CHALLENGE_TAG_NONCE_LEN + 1U + pwd_len, rsp_digest,
-			       BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN, &len);
-	if (err != 0) {
-		LOG_WRN("Generate response digest failed %d", err);
-		return err;
-	}
-	return 0;
-}
-
-int bt_pbap_verify_authentication(uint8_t nonce[BT_OBEX_CHALLENGE_TAG_NONCE_LEN],
-				  uint8_t rsp_digest[BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN],
-				  const uint8_t *pwd)
-{
-	uint8_t result[BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN];
-	int err;
-
-	err = bt_pbap_calculate_rsp_digest(pwd, nonce, result);
-	if (err == 0) {
-		err = memcmp(result, rsp_digest, BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN);
-		if (err != 0) {
-			LOG_ERR("rsp_digest is invalid");
-			return -EINVAL;
-		}
-	}
-
-	return err;
 }
 
 #if defined(CONFIG_BT_PBAP_PSE)
@@ -1222,7 +1122,7 @@ static int pbap_pse_rfcomm_accept(struct bt_conn *conn,
 				  struct bt_goep **goep)
 {
 	struct bt_pbap_pse_rfcomm *pbap_pse_rfcomm;
-	struct bt_pbap_pse *pbap_pse;
+	struct bt_pbap_pse *pbap_pse = NULL;
 	int err;
 
 	pbap_pse_rfcomm = CONTAINER_OF(server, struct bt_pbap_pse_rfcomm, server);
@@ -1235,7 +1135,10 @@ static int pbap_pse_rfcomm_accept(struct bt_conn *conn,
 		return err;
 	}
 
+	__ASSERT(pbap_pse != NULL, "Invalid pbap pse instance");
+
 	pbap_pse->_goep.transport_ops = &pse_rfcomm_transport_ops;
+	BT_GOEP_INIT_V1(&pbap_pse->_goep, &pbap_pse->_goep_transport.v1);
 	*goep = &pbap_pse->_goep;
 
 	atomic_set(&pbap_pse->_transport_state, BT_PBAP_TRANSPORT_STATE_CONNECTING);
@@ -1248,7 +1151,7 @@ static int pbap_pse_l2cap_accept(struct bt_conn *conn,
 				 struct bt_goep **goep)
 {
 	struct bt_pbap_pse_l2cap *pbap_pse_l2cap;
-	struct bt_pbap_pse *pbap_pse;
+	struct bt_pbap_pse *pbap_pse = NULL;
 	int err;
 
 	pbap_pse_l2cap = CONTAINER_OF(server, struct bt_pbap_pse_l2cap, server);
@@ -1260,7 +1163,11 @@ static int pbap_pse_l2cap_accept(struct bt_conn *conn,
 	if (err != 0) {
 		return err;
 	}
+
+	__ASSERT(pbap_pse != NULL, "Invalid pbap pse instance");
+
 	pbap_pse->_goep.transport_ops = &pse_l2cap_transport_ops;
+	BT_GOEP_INIT_V2(&pbap_pse->_goep, &pbap_pse->_goep_transport.v2);
 	*goep = &pbap_pse->_goep;
 
 	atomic_set(&pbap_pse->_transport_state, BT_PBAP_TRANSPORT_STATE_CONNECTING);
@@ -1455,7 +1362,7 @@ static int pbap_pse_get_rsp(struct bt_pbap_pse *pbap_pse, uint8_t rsp_code, stru
 
 	if (!atomic_test_and_set_bit(&pbap_pse->_flags, BT_PBAP_FLAG_RSP_ONGOING)) {
 		clear_bit = true;
-		if (pbap_pse->_goep._goep_v2 && rsp_code == BT_OBEX_RSP_CODE_SUCCESS) {
+		if (pbap_pse->_goep.v2 != NULL && rsp_code == BT_OBEX_RSP_CODE_SUCCESS) {
 			err = bt_pbap_check_srm(buf);
 			if (err != 0) {
 				LOG_ERR("SRM check failed %d", err);

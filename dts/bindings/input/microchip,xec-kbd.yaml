@@ -12,14 +12,6 @@ include:
   - name: microchip,dmec-ecia-girq.yaml
 
 properties:
-  "#address-cells":
-    required: true
-    const: 1
-
-  "#size-cells":
-    type: int
-    const: 0
-
   reg:
     required: true
 
@@ -33,6 +25,10 @@ properties:
 
   row-size:
     required: true
+    min: 1
+    max: 8
 
   col-size:
     required: true
+    min: 1
+    max: 18

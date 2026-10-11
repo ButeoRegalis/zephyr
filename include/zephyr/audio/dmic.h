@@ -10,6 +10,7 @@
 /**
  * @file
  * @brief Public API header file for Digital Microphones
+ * @ingroup audio_dmic_interface
  *
  * This file contains the Digital Microphone APIs
  */
@@ -20,6 +21,8 @@
 
 /**
  * @defgroup audio_interface Audio
+ * @ingroup io_interfaces
+ * @brief Interfaces for audio devices.
  * @{
  * @}
  */
@@ -148,6 +151,8 @@ struct pcm_stream_cfg {
 	uint8_t pcm_width;
 	/** PCM sample block size per transfer */
 	uint16_t block_size;
+	/** Gain to apply to the channel (dB) */
+	int8_t gain_db;
 	/** SLAB for DMIC driver to allocate buffers for stream */
 	struct k_mem_slab *mem_slab;
 };
@@ -204,12 +209,14 @@ struct pdm_chan_cfg {
  * Input configuration structure for the DMIC configuration API
  */
 struct dmic_cfg {
+	/** PDM interface configuration */
 	struct pdm_io_cfg io;
 	/**
 	 * Array of pcm_stream_cfg for application to provide
 	 * configuration for each stream
 	 */
 	struct pcm_stream_cfg *streams;
+	/** PDM channel configuration */
 	struct pdm_chan_cfg channel;
 };
 

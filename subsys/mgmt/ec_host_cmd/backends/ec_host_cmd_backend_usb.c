@@ -38,7 +38,7 @@ BUILD_ASSERT((CONFIG_EC_HOST_CMD_HANDLER_BUFFER_ALIGN % UDC_BUF_ALIGN) == 0, "Bu
 
 /* Timeout for receiving entire request. */
 #define OUT_TRANSFER_TIMEOUT_MS 100
-/* Timeout for sending response, starting from notifing host that it is ready. */
+/* Timeout for sending response, starting from notifying host that it is ready. */
 #define IN_TRANSFER_TIMEOUT_MS  200
 
 enum ec_host_cmd_usb_irq_type {
@@ -65,12 +65,12 @@ enum ec_host_cmd_usb_state {
 
 	/*
 	 * Receiving ongoing. The first part of the host command request has been received,
-	 * potentialy waiting for the rest.
+	 * potentially waiting for the rest.
 	 */
 	USB_EC_HOST_CMD_STATE_RECEIVING,
 
 	/*
-	 * The host command request has been fully received and the command is being proccessed.
+	 * The host command request has been fully received and the command is being processed.
 	 * The host command handler always has to send a respond, even if the request is invalid.
 	 */
 	USB_EC_HOST_CMD_STATE_PROCESSING,
@@ -104,7 +104,7 @@ struct ec_host_cmd_desc {
 struct ec_host_cmd_usb_ctx {
 	struct usbd_class_data *c_data;
 	struct ec_host_cmd_desc *const desc;
-	const struct usb_desc_header **const fs_desc;
+	const struct usb_desc_header *const *const fs_desc;
 	struct ec_host_cmd_rx_ctx *rx_ctx;
 	struct ec_host_cmd_tx_buf *tx_buf;
 	uint8_t *bulk_out_buf;
@@ -116,7 +116,7 @@ struct ec_host_cmd_usb_ctx {
 	struct k_work_delayable reset_work;
 };
 
-static int expected_request_len(const struct ec_host_cmd_request_header *header)
+static size_t expected_request_len(const struct ec_host_cmd_request_header *header)
 {
 	/* Check host request version */
 	if (header->prtcl_ver != EC_HOST_REQUEST_VERSION) {
@@ -254,7 +254,7 @@ static int handle_out_transfer(struct usbd_class_data *const c_data)
 		}
 		ret = usbd_ep_enqueue(c_data, ctx->usb_rx_buf);
 		if (ret) {
-			net_buf_unref(ctx->usb_rx_buf);
+			net_buf_drop(&ctx->usb_rx_buf);
 			k_work_reschedule(&ctx->reset_work, K_NO_WAIT);
 			LOG_ERR("Failed to enqueue EP OUT: %d", ret);
 			return 0;
@@ -334,7 +334,7 @@ static int ec_host_cmd_request(struct usbd_class_data *const c_data, struct net_
 		ret = usbd_ep_enqueue(c_data, ctx->usb_rx_buf);
 		if (ret) {
 			LOG_ERR("Failed to enqueue EP OUT: %d", ret);
-			net_buf_unref(ctx->usb_rx_buf);
+			net_buf_drop(&ctx->usb_rx_buf);
 			k_work_schedule(&ctx->reset_work, K_NO_WAIT);
 			return 0;
 		}
@@ -349,7 +349,8 @@ static int ec_host_cmd_request(struct usbd_class_data *const c_data, struct net_
 	return 0;
 }
 
-static void *ec_host_cmd_get_desc(struct usbd_class_data *const c_data, const enum usbd_speed speed)
+static const void *ec_host_cmd_get_desc(struct usbd_class_data *const c_data,
+					const enum usbd_speed speed)
 {
 	const struct ec_host_cmd_usb_ctx *ctx = usbd_class_get_private(c_data);
 
@@ -390,7 +391,7 @@ static void ec_host_cmd_enable(struct usbd_class_data *const c_data)
 	if (ret) {
 		ctx->state = USB_EC_HOST_CMD_STATE_DISABLED;
 		LOG_ERR("Failed to enqueue EP OUT: %d", ret);
-		net_buf_unref(ctx->usb_rx_buf);
+		net_buf_drop(&ctx->usb_rx_buf);
 		return;
 	}
 	ctx->state = USB_EC_HOST_CMD_STATE_READY_TO_RX;
@@ -473,7 +474,7 @@ static void ec_host_cmd_reset(struct k_work *work)
 	ec_host_cmd_enable(ctx->c_data);
 }
 
-__maybe_unused static struct usbd_class_api ec_host_cmd_api = {
+__maybe_unused static const struct usbd_class_api ec_host_cmd_api = {
 	.request = ec_host_cmd_request,
 	.suspended = ec_host_cmd_suspended,
 	.resumed = ec_host_cmd_resumed,
@@ -616,7 +617,7 @@ static struct ec_host_cmd_desc ec_host_cmd_desc = {
 		},
 };
 
-static const struct usb_desc_header *ec_host_cmd_fs_desc[] = {
+static const struct usb_desc_header *const ec_host_cmd_fs_desc[] = {
 	(struct usb_desc_header *)&ec_host_cmd_desc.if0,
 	(struct usb_desc_header *)&ec_host_cmd_desc.out_ep,
 	(struct usb_desc_header *)&ec_host_cmd_desc.in_bulk_ep,

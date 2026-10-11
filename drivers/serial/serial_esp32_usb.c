@@ -106,8 +106,9 @@ static int serial_esp32_usb_init(const struct device *dev)
 
 	usb_serial_jtag_ll_phy_enable_pad(true);
 
-#if defined(CONFIG_SOC_SERIES_ESP32C5) || defined(CONFIG_SOC_SERIES_ESP32C6) ||                    \
-	defined(CONFIG_SOC_SERIES_ESP32H2)
+#if defined(CONFIG_SOC_SERIES_ESP32C5) || defined(CONFIG_SOC_SERIES_ESP32C61) ||                   \
+	defined(CONFIG_SOC_SERIES_ESP32C6) || defined(CONFIG_SOC_SERIES_ESP32H2) ||                \
+	defined(CONFIG_SOC_SERIES_ESP32P4)
 	usb_serial_jtag_ll_phy_set_defaults();
 #endif
 
@@ -150,7 +151,7 @@ static void serial_esp32_usb_irq_tx_enable(const struct device *dev)
 	if (data->irq_cb != NULL) {
 		unsigned int key = irq_lock();
 		data->irq_cb(dev, data->irq_cb_data);
-		arch_irq_unlock(key);
+		irq_unlock(key);
 	}
 }
 
@@ -213,14 +214,12 @@ static int serial_esp32_usb_irq_is_pending(const struct device *dev)
 	return serial_esp32_usb_irq_rx_ready(dev) || serial_esp32_usb_irq_tx_ready(dev);
 }
 
-static int serial_esp32_usb_irq_update(const struct device *dev)
+static void serial_esp32_usb_irq_update(const struct device *dev)
 {
 	ARG_UNUSED(dev);
 
 	usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
 	usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
-
-	return 1;
 }
 
 static void serial_esp32_usb_irq_callback_set(const struct device *dev,

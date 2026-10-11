@@ -12,6 +12,7 @@
 #include <stddef.h>
 
 #include <zephyr/autoconf.h>
+#include <zephyr/bluetooth/audio/ascs.h>
 #include <zephyr/bluetooth/audio/audio.h>
 #include <zephyr/bluetooth/audio/bap.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -27,19 +28,18 @@
 #define UNICAST_GROUP_CNT	 CONFIG_BT_BAP_UNICAST_CLIENT_GROUP_COUNT
 #define UNICAST_GROUP_STREAM_CNT CONFIG_BT_BAP_UNICAST_CLIENT_GROUP_STREAM_COUNT
 #else /* !CONFIG_BT_BAP_UNICAST_CLIENT */
-#define UNICAST_GROUP_CNT 0
-#define UNICAST_GROUP_STREAM_CNT 0
+#define UNICAST_GROUP_CNT 0U
+#define UNICAST_GROUP_STREAM_CNT 0U
 #endif /* CONFIG_BT_BAP_UNICAST_CLIENT */
 #if defined(CONFIG_BT_BAP_BROADCAST_SOURCE)
 #define BROADCAST_STREAM_CNT CONFIG_BT_BAP_BROADCAST_SRC_STREAM_COUNT
 #else /* !CONFIG_BT_BAP_BROADCAST_SOURCE */
-#define BROADCAST_STREAM_CNT 0
+#define BROADCAST_STREAM_CNT 0U
 #endif /* CONFIG_BT_BAP_BROADCAST_SOURCE */
 
 /* Temp struct declarations to handle circular dependencies */
 struct bt_bap_unicast_group;
 struct bt_bap_broadcast_source;
-struct bt_bap_broadcast_sink;
 
 struct bt_bap_ep {
 	uint8_t dir;
@@ -58,11 +58,6 @@ struct bt_bap_ep {
 
 	/* Used by the unicast server and client */
 	bool receiver_ready;
-
-	/* TODO: Create a union to reduce memory usage */
-	struct bt_bap_unicast_group *unicast_group;
-	struct bt_bap_broadcast_source *broadcast_source;
-	struct bt_bap_broadcast_sink *broadcast_sink;
 };
 
 struct bt_bap_unicast_group_cig_param {
@@ -101,14 +96,12 @@ struct bt_bap_unicast_group {
 	uint32_t source_pd;
 };
 
-#if CONFIG_BT_AUDIO_CODEC_CFG_MAX_DATA_SIZE > 0
 struct bt_audio_broadcast_stream_data {
 	/** Codec Specific Data len */
 	size_t data_len;
 	/** Codec Specific Data */
 	uint8_t data[CONFIG_BT_AUDIO_CODEC_CFG_MAX_DATA_SIZE];
 };
-#endif /* CONFIG_BT_AUDIO_CODEC_CFG_MAX_DATA_SIZE > 0 */
 
 struct bt_bap_broadcast_source {
 	uint8_t stream_count;
@@ -123,10 +116,8 @@ struct bt_bap_broadcast_source {
 	uint16_t iso_interval;
 #endif /* CONFIG_BT_ISO_TEST_PARAMS */
 
-#if CONFIG_BT_AUDIO_CODEC_CFG_MAX_DATA_SIZE > 0
 	/* The codec specific configured data for each stream in the subgroup */
 	struct bt_audio_broadcast_stream_data stream_data[BROADCAST_STREAM_CNT];
-#endif /* CONFIG_BT_AUDIO_CODEC_CFG_MAX_DATA_SIZE > 0 */
 	uint8_t broadcast_code[BT_ISO_BROADCAST_CODE_SIZE];
 
 	/* The subgroups containing the streams used to create the broadcast source */

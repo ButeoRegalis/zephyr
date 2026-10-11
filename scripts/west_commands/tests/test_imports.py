@@ -2,6 +2,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+# This file checks if all the expected runners are exported by
+# ZephyrBinaryRunner.get_runners(). This by design means the list of available
+# runners is duplicated between where they are defined and this check.
+# So duplicate code is expected and tolerated for this test file.
+#
+# pylint: disable=duplicate-code
+
 from runners.core import ZephyrBinaryRunner
 
 
@@ -18,6 +25,7 @@ def test_runner_imports():
         # zephyr-keep-sorted-start
         'amebaflash',
         'arc-nsim',
+        'bflb_flash_command',
         'bflb_mcu_tool',
         'blackmagicprobe',
         'bossac',
@@ -40,10 +48,12 @@ def test_runner_imports():
         'minichlink',
         'misc-flasher',
         'mpcli',
+        'mplab_ipe',
         'native',
         'nrfjprog',
         'nrfutil',
         'nxp_s32dbg',
+        'openfpgaloader',
         'openocd',
         'probe-rs',
         'pyocd',
@@ -51,6 +61,8 @@ def test_runner_imports():
         'renode',
         'renode-robot',
         'rfp',
+        'rtkprog',
+        'rtsflash',
         'sftool',
         'silabs_commander',
         'spi_burn',
@@ -62,6 +74,7 @@ def test_runner_imports():
         'teensy',
         'trace32',
         'uf2',
+        'vegadude',
         'wchisp',
         'wlink',
         'xsdb',

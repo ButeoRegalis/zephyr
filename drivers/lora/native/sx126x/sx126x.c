@@ -10,6 +10,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "sx126x.h"
+#include "sx126x_gfsk.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(sx126x, CONFIG_LORA_LOG_LEVEL);
@@ -19,6 +20,12 @@ LOG_MODULE_REGISTER(sx126x, CONFIG_LORA_LOG_LEVEL);
 	 ? SX126X_STATE_SLEEP : SX126X_STATE_IDLE)
 
 #define SX126X_SF56_MIN_PREAMBLE_LEN	12
+
+#ifdef CONFIG_LORA_GFSK
+#define SX126X_IS_GFSK(data) ((data)->gfsk)
+#else
+#define SX126X_IS_GFSK(data) false
+#endif
 
 static int bandwidth_to_reg(enum lora_signal_bandwidth bw, uint8_t *reg)
 {
@@ -146,7 +153,7 @@ static int sx126x_set_buffer_base_address(const struct device *dev,
 	return sx126x_hal_write_cmd(dev, SX126X_CMD_SET_BUFFER_BASE_ADDRESS, buf, 2);
 }
 
-static int sx126x_set_packet_type(const struct device *dev, uint8_t type)
+int sx126x_set_packet_type(const struct device *dev, uint8_t type)
 {
 	return sx126x_hal_write_cmd(dev, SX126X_CMD_SET_PACKET_TYPE, &type, 1);
 }
@@ -258,10 +265,14 @@ static int sx126x_set_modulation_params(const struct device *dev,
  * Workaround — Modulation Quality with 500 kHz LoRa Bandwidth
  * (DS_SX1261-2_V1.2, chapter 15.1)
  *
- * Must be called before each packet transmission.
+ * Must be called before each packet transmission. The bit is cleared only
+ * for 500 kHz LoRa; every other LoRa bandwidth and every GFSK setup wants
+ * it set.
  */
-static int sx126x_apply_tx_modulation_workaround(const struct device *dev,
-						  enum lora_signal_bandwidth bw)
+/* The bit is cleared for one LoRa bandwidth and set for everything else,
+ * GFSK included (DS.SX1261-2.W.APP Rev 2.2, 15.1).
+ */
+static int sx126x_apply_tx_modulation_workaround(const struct device *dev, bool lora_bw_500)
 {
 	uint8_t reg_val;
 	int ret;
@@ -271,7 +282,7 @@ static int sx126x_apply_tx_modulation_workaround(const struct device *dev,
 		return ret;
 	}
 
-	if (bw == BW_500_KHZ) {
+	if (lora_bw_500) {
 		reg_val &= ~BIT(2);
 	} else {
 		reg_val |= BIT(2);
@@ -318,18 +329,25 @@ static int sx126x_set_packet_params(const struct device *dev,
 	return sx126x_hal_write_regs(dev, SX126X_REG_IQ_POLARITY, &reg_val, 1);
 }
 
-static int sx126x_set_sync_word(const struct device *dev, bool public_network)
+static int sx126x_set_sync_word(const struct device *dev, const struct lora_modem_config *config)
 {
-	uint16_t sync_word = public_network ?
-			     SX126X_LORA_SYNC_WORD_PUBLIC :
-			     SX126X_LORA_SYNC_WORD_PRIVATE;
+	uint16_t sync_word;
 	uint8_t buf[2];
+
+	if (config->sync_word) {
+		/* Matching behaviour for other LoRa backends */
+		sync_word = 0x0404 | ((config->sync_word & 0xF0) << 8) |
+			    ((config->sync_word & 0x0F) << 4);
+	} else {
+		sync_word = config->public_network ? SX126X_LORA_SYNC_WORD_PUBLIC
+						   : SX126X_LORA_SYNC_WORD_PRIVATE;
+	}
 
 	sys_put_be16(sync_word, buf);
 	return sx126x_hal_write_regs(dev, SX126X_REG_LORA_SYNC_WORD_MSB, buf, 2);
 }
 
-static int sx126x_set_rx_gain(const struct device *dev, bool boosted)
+int sx126x_set_rx_gain(const struct device *dev, bool boosted)
 {
 	uint8_t val = boosted ? SX126X_RX_GAIN_BOOSTED : SX126X_RX_GAIN_POWER_SAVING;
 
@@ -405,8 +423,27 @@ static int sx126x_get_rx_buffer_status(const struct device *dev,
 static int sx126x_get_packet_status(const struct device *dev,
 				    int16_t *rssi, int8_t *snr)
 {
+	struct sx126x_data *data = dev->data;
 	uint8_t buf[3];
 	int ret;
+
+	/*
+	 * The three status bytes carry different readings depending on the
+	 * packet type: RxStatus, RssiSync and RssiAvg under GFSK against
+	 * RssiPkt, SnrPkt and SignalRssiPkt under LoRa (DS.SX1261-2.W.APP
+	 * Rev 2.2, GetPacketStatus).
+	 */
+	if (IS_ENABLED(CONFIG_LORA_GFSK) && data->gfsk) {
+		ret = sx126x_hal_read_cmd(dev, SX126X_CMD_GET_PACKET_STATUS, buf, 3);
+		if (ret == 0) {
+			/* RSSI is -value/2 dBm, averaged over the payload */
+			*rssi = -((int16_t)buf[2] >> 1);
+			/* GFSK estimates no signal-to-noise ratio */
+			*snr = 0;
+		}
+
+		return ret;
+	}
 
 	ret = sx126x_hal_read_cmd(dev, SX126X_CMD_GET_PACKET_STATUS, buf, 2);
 	if (ret == 0) {
@@ -617,7 +654,7 @@ static int sx126x_reconnect_rf_gpios(const struct device *dev)
 }
 #endif /* CONFIG_PM_DEVICE */
 
-static int sx126x_set_sleep(const struct device *dev)
+int sx126x_set_sleep(const struct device *dev)
 {
 	struct sx126x_data *data = dev->data;
 	uint8_t cfg = SX126X_SLEEP_WARM_START;
@@ -833,8 +870,61 @@ static void sx126x_irq_work_handler(struct k_work *work)
 	}
 }
 
-static int sx126x_lora_config(const struct device *dev,
-			      struct lora_modem_config *config)
+static int sx126x_set_configured_packet_params(const struct device *dev, uint8_t payload_len)
+{
+	struct sx126x_data *data = dev->data;
+
+	if (SX126X_IS_GFSK(data)) {
+		return sx126x_set_gfsk_packet_params(dev, &data->gfsk_config, payload_len);
+	}
+
+	return sx126x_set_packet_params(
+		dev, data->config.preamble_len, SX126X_LORA_HEADER_EXPLICIT, payload_len,
+		data->config.packet_crc_disable ? SX126X_LORA_CRC_OFF : SX126X_LORA_CRC_ON,
+		data->config.iq_inverted ? SX126X_LORA_IQ_INVERTED : SX126X_LORA_IQ_STANDARD);
+}
+
+int sx126x_config_begin(const struct device *dev)
+{
+	struct sx126x_data *data = dev->data;
+	int ret;
+
+	if (!atomic_cas(&data->state, SX126X_REST_STATE, SX126X_STATE_IDLE)) {
+		return -EBUSY;
+	}
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+
+	ret = sx126x_ensure_ready(dev);
+	if (ret < 0) {
+		k_mutex_unlock(&data->lock);
+		atomic_set(&data->state, SX126X_REST_STATE);
+	}
+
+	return ret;
+}
+
+/* Frequency and transmit power are reached the same way whichever modem the
+ * rest of the configuration is for.
+ */
+int sx126x_config_carrier(const struct device *dev, uint32_t frequency, int8_t tx_power)
+{
+	int ret;
+
+	ret = sx126x_calibrate_image(dev, frequency);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = sx126x_set_rf_frequency(dev, frequency);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return sx126x_hal_configure_tx_params(dev, tx_power, frequency, SX126X_RAMP_200_US);
+}
+
+static int sx126x_lora_config(const struct device *dev, const struct lora_modem_config *config)
 {
 	struct sx126x_data *data = dev->data;
 	const struct sx126x_hal_config *hal_config = dev->config;
@@ -847,16 +937,8 @@ static int sx126x_lora_config(const struct device *dev,
 		return ret;
 	}
 
-	if (!atomic_cas(&data->state, SX126X_REST_STATE, SX126X_STATE_IDLE)) {
-		return -EBUSY;
-	}
-
-	k_mutex_lock(&data->lock, K_FOREVER);
-
-	ret = sx126x_ensure_ready(dev);
+	ret = sx126x_config_begin(dev);
 	if (ret < 0) {
-		k_mutex_unlock(&data->lock);
-		atomic_set(&data->state, SX126X_REST_STATE);
 		return ret;
 	}
 
@@ -875,22 +957,20 @@ static int sx126x_lora_config(const struct device *dev,
 		data->config.preamble_len = SX126X_SF56_MIN_PREAMBLE_LEN;
 	}
 
-	/* Run image calibration for frequency band */
-	ret = sx126x_calibrate_image(dev, config->frequency);
+	/*
+	 * Selecting the modem resets part of the radio, so it comes before
+	 * everything the configuration then sets (DS.SX1261-2.W.APP Rev 2.2,
+	 * 13.4.2). The radio also keeps whichever type was last selected, so
+	 * say it every time rather than relying on the one set at init: a
+	 * GFSK setup in between would otherwise leave LoRa parameters going
+	 * to the wrong modem.
+	 */
+	ret = sx126x_set_packet_type(dev, SX126X_PACKET_TYPE_LORA);
 	if (ret < 0) {
 		goto out;
 	}
 
-	/* Set RF frequency */
-	ret = sx126x_set_rf_frequency(dev, config->frequency);
-	if (ret < 0) {
-		goto out;
-	}
-
-	/* Configure PA and TX power based on chip variant and frequency */
-	ret = sx126x_hal_configure_tx_params(dev, config->tx_power,
-						config->frequency,
-						SX126X_RAMP_200_US);
+	ret = sx126x_config_carrier(dev, config->frequency, config->tx_power);
 	if (ret < 0) {
 		goto out;
 	}
@@ -899,17 +979,14 @@ static int sx126x_lora_config(const struct device *dev,
 	ret = bandwidth_to_reg(config->bandwidth, &bw_reg);
 	__ASSERT_NO_MSG(ret == 0);
 	ldro = should_enable_ldro(config->datarate, config->bandwidth, hal_config);
-	ret = sx126x_set_modulation_params(dev,
-					   config->datarate,
-					   bw_reg,
-					   config->coding_rate,
+	ret = sx126x_set_modulation_params(dev, config->datarate, bw_reg, config->coding_rate,
 					   ldro);
 	if (ret < 0) {
 		goto out;
 	}
 
 	/* Set sync word */
-	ret = sx126x_set_sync_word(dev, config->public_network);
+	ret = sx126x_set_sync_word(dev, config);
 	if (ret < 0) {
 		goto out;
 	}
@@ -920,6 +997,7 @@ static int sx126x_lora_config(const struct device *dev,
 		goto out;
 	}
 
+	data->gfsk = false;
 	data->config_valid = true;
 	LOG_DBG("Config: freq=%u, SF=%d, BW=%d, CR=%d, power=%d",
 		config->frequency, config->datarate, config->bandwidth,
@@ -948,6 +1026,16 @@ static int sx126x_lora_send_async(const struct device *dev,
 		return -EINVAL;
 	}
 
+	/* The radio clocks out the configured length, so a shorter payload
+	 * would put whatever the buffer still held on air.
+	 */
+	if (IS_ENABLED(CONFIG_LORA_GFSK) && data->gfsk && data->gfsk_config.fixed_len &&
+	    data_len != data->gfsk_config.payload_len) {
+		LOG_ERR("Fixed-length GFSK takes %u bytes, got %u", data->gfsk_config.payload_len,
+			data_len);
+		return -EINVAL;
+	}
+
 	if (!atomic_cas(&data->state, SX126X_REST_STATE, SX126X_STATE_TX)) {
 		LOG_ERR("Busy");
 		return -EBUSY;
@@ -966,14 +1054,7 @@ static int sx126x_lora_send_async(const struct device *dev,
 	k_msgq_purge(&data->tx_msgq);
 
 	/* Set packet parameters */
-	ret = sx126x_set_packet_params(dev,
-				       data->config.preamble_len,
-				       SX126X_LORA_HEADER_EXPLICIT,
-				       data_len,
-				       data->config.packet_crc_disable ?
-				       SX126X_LORA_CRC_OFF : SX126X_LORA_CRC_ON,
-				       data->config.iq_inverted ?
-				       SX126X_LORA_IQ_INVERTED : SX126X_LORA_IQ_STANDARD);
+	ret = sx126x_set_configured_packet_params(dev, data_len);
 	if (ret < 0) {
 		goto out_error;
 	}
@@ -984,7 +1065,8 @@ static int sx126x_lora_send_async(const struct device *dev,
 		goto out_error;
 	}
 
-	ret = sx126x_apply_tx_modulation_workaround(dev, data->config.bandwidth);
+	ret = sx126x_apply_tx_modulation_workaround(
+		dev, !SX126X_IS_GFSK(data) && data->config.bandwidth == BW_500_KHZ);
 	if (ret < 0) {
 		goto out_error;
 	}
@@ -1065,14 +1147,7 @@ static int sx126x_lora_recv(const struct device *dev, uint8_t *data_buf,
 	k_msgq_purge(&data->rx_msgq);
 
 	/* Set packet parameters for variable length reception */
-	ret = sx126x_set_packet_params(dev,
-				       data->config.preamble_len,
-				       SX126X_LORA_HEADER_EXPLICIT,
-				       SX126X_MAX_PAYLOAD_LEN,
-				       data->config.packet_crc_disable ?
-				       SX126X_LORA_CRC_OFF : SX126X_LORA_CRC_ON,
-				       data->config.iq_inverted ?
-				       SX126X_LORA_IQ_INVERTED : SX126X_LORA_IQ_STANDARD);
+	ret = sx126x_set_configured_packet_params(dev, SX126X_MAX_PAYLOAD_LEN);
 	if (ret < 0) {
 		sx126x_set_sleep(dev);
 		k_mutex_unlock(&data->lock);
@@ -1164,14 +1239,7 @@ static int sx126x_lora_recv_async(const struct device *dev,
 	data->rx_cb_user_data = user_data;
 
 	/* Set packet parameters */
-	ret = sx126x_set_packet_params(dev,
-				       data->config.preamble_len,
-				       SX126X_LORA_HEADER_EXPLICIT,
-				       SX126X_MAX_PAYLOAD_LEN,
-				       data->config.packet_crc_disable ?
-				       SX126X_LORA_CRC_OFF : SX126X_LORA_CRC_ON,
-				       data->config.iq_inverted ?
-				       SX126X_LORA_IQ_INVERTED : SX126X_LORA_IQ_STANDARD);
+	ret = sx126x_set_configured_packet_params(dev, SX126X_MAX_PAYLOAD_LEN);
 	if (ret < 0) {
 		data->rx_cb = NULL;
 		sx126x_set_sleep(dev);
@@ -1233,74 +1301,34 @@ static int sx126x_lora_recv_async(const struct device *dev,
  *
  * See samples/drivers/lora/duty_cycle/
  */
-static int sx126x_lora_recv_duty_cycle_async(const struct device *dev,
-					     k_timeout_t rx_period,
-					     k_timeout_t sleep_period,
-					     lora_recv_cb cb, void *user_data)
+static void sx126x_duty_cycle_stop(const struct device *dev)
+{
+	/*
+	 * During duty cycle the BUSY pin stays asserted even in the
+	 * sleep phase. Wake the radio via a raw NSS edge (bypasses
+	 * BUSY check) so the standby command can go through
+	 * immediately.
+	 */
+	if (sx126x_hal_is_busy(dev)) {
+		sx126x_hal_wakeup(dev);
+	}
+	sx126x_set_standby(dev, SX126X_STANDBY_RC);
+	sx126x_set_sleep(dev);
+}
+
+static int sx126x_duty_cycle_start(const struct device *dev,
+				   k_timeout_t rx_period,
+				   k_timeout_t sleep_period)
 {
 	struct sx126x_data *data = dev->data;
 	int ret;
 
-	k_mutex_lock(&data->lock, K_FOREVER);
-	if (cb == NULL) {
-		data->rx_cb = NULL;
-		data->rx_cb_user_data = NULL;
-		if (atomic_cas(&data->state, SX126X_STATE_RX_DUTY_CYCLE,
-			       SX126X_STATE_IDLE)) {
-			/*
-			 * During duty cycle the BUSY pin stays asserted
-			 * even in the sleep phase. Wake the radio via a
-			 * raw NSS edge (bypasses BUSY check) so the
-			 * standby command can go through immediately.
-			 */
-			if (sx126x_hal_is_busy(dev)) {
-				sx126x_hal_wakeup(dev);
-			}
-			sx126x_set_standby(dev, SX126X_STANDBY_RC);
-			sx126x_set_sleep(dev);
-		}
-		k_mutex_unlock(&data->lock);
-		return 0;
-	}
-
-	if (!data->config_valid) {
-		LOG_ERR("Not configured");
-		k_mutex_unlock(&data->lock);
-		return -EINVAL;
-	}
-
-	if (!atomic_cas(&data->state, SX126X_REST_STATE,
-			SX126X_STATE_RX_DUTY_CYCLE)) {
-		LOG_ERR("Busy");
-		k_mutex_unlock(&data->lock);
-		return -EBUSY;
-	}
-
-	ret = sx126x_ensure_ready(dev);
-	if (ret < 0) {
-		atomic_set(&data->state, SX126X_REST_STATE);
-		k_mutex_unlock(&data->lock);
-		return ret;
-	}
-
-	data->rx_cb = cb;
-	data->rx_cb_user_data = user_data;
-
-	/* Convert Zephyr timeouts to SX126x timeout ticks */
 	data->duty_cycle.rx_period = SX126X_MS_TO_TIMEOUT(
 		k_ticks_to_ms_ceil32(rx_period.ticks));
 	data->duty_cycle.sleep_period = SX126X_MS_TO_TIMEOUT(
 		k_ticks_to_ms_ceil32(sleep_period.ticks));
-	/* Set packet parameters for variable length reception */
-	ret = sx126x_set_packet_params(dev,
-				       data->config.preamble_len,
-				       SX126X_LORA_HEADER_EXPLICIT,
-				       SX126X_MAX_PAYLOAD_LEN,
-				       data->config.packet_crc_disable ?
-				       SX126X_LORA_CRC_OFF : SX126X_LORA_CRC_ON,
-				       data->config.iq_inverted ?
-				       SX126X_LORA_IQ_INVERTED :
-				       SX126X_LORA_IQ_STANDARD);
+
+	ret = sx126x_set_configured_packet_params(dev, SX126X_MAX_PAYLOAD_LEN);
 	if (ret < 0) {
 		goto out_error;
 	}
@@ -1324,6 +1352,115 @@ out_error:
 	return ret;
 }
 
+static int sx126x_duty_cycle_enter(const struct device *dev,
+				   lora_recv_cb cb, void *user_data)
+{
+	struct sx126x_data *data = dev->data;
+	int ret;
+
+	if (!data->config_valid) {
+		LOG_ERR("Not configured");
+		return -EINVAL;
+	}
+
+	if (!atomic_cas(&data->state, SX126X_REST_STATE,
+			SX126X_STATE_RX_DUTY_CYCLE)) {
+		LOG_ERR("Busy");
+		return -EBUSY;
+	}
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+
+	ret = sx126x_ensure_ready(dev);
+	if (ret < 0) {
+		k_mutex_unlock(&data->lock);
+		atomic_set(&data->state, SX126X_REST_STATE);
+		return ret;
+	}
+
+	data->rx_cb = cb;
+	data->rx_cb_user_data = user_data;
+
+	return 0;
+}
+
+static int sx126x_lora_recv_duty_cycle(const struct device *dev,
+				       k_timeout_t rx_period,
+				       k_timeout_t sleep_period,
+				       uint8_t *data_buf, uint8_t size,
+				       k_timeout_t timeout,
+				       int16_t *rssi, int8_t *snr)
+{
+	struct sx126x_data *data = dev->data;
+	struct sx126x_rx_result result;
+	int ret;
+
+	ret = sx126x_duty_cycle_enter(dev, NULL, NULL);
+	if (ret < 0) {
+		return ret;
+	}
+
+	k_msgq_purge(&data->rx_msgq);
+
+	ret = sx126x_duty_cycle_start(dev, rx_period, sleep_period);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Block until a packet arrives or timeout */
+	ret = k_msgq_get(&data->rx_msgq, &result, timeout);
+	if (ret < 0) {
+		LOG_DBG("RX duty cycle timeout");
+		sx126x_duty_cycle_stop(dev);
+		return -EAGAIN;
+	}
+
+	sx126x_duty_cycle_stop(dev);
+
+	if (result.status > 0) {
+		int copy_len = MIN(result.status, size);
+
+		memcpy(data_buf, data->rx_buf, copy_len);
+		if (rssi != NULL) {
+			*rssi = result.rssi;
+		}
+		if (snr != NULL) {
+			*snr = result.snr;
+		}
+		return copy_len;
+	}
+
+	return result.status;
+}
+
+static int sx126x_lora_recv_duty_cycle_async(const struct device *dev,
+					     k_timeout_t rx_period,
+					     k_timeout_t sleep_period,
+					     lora_recv_cb cb, void *user_data)
+{
+	struct sx126x_data *data = dev->data;
+	int ret;
+
+	if (cb == NULL) {
+		k_mutex_lock(&data->lock, K_FOREVER);
+		data->rx_cb = NULL;
+		data->rx_cb_user_data = NULL;
+		if (atomic_cas(&data->state, SX126X_STATE_RX_DUTY_CYCLE,
+			       SX126X_STATE_IDLE)) {
+			sx126x_duty_cycle_stop(dev);
+		}
+		k_mutex_unlock(&data->lock);
+		return 0;
+	}
+
+	ret = sx126x_duty_cycle_enter(dev, cb, user_data);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return sx126x_duty_cycle_start(dev, rx_period, sleep_period);
+}
+
 static uint32_t sx126x_lora_airtime(const struct device *dev, uint32_t data_len)
 {
 	struct sx126x_data *data = dev->data;
@@ -1335,6 +1472,22 @@ static uint32_t sx126x_lora_airtime(const struct device *dev, uint32_t data_len)
 
 	if (!data->config_valid) {
 		return 0;
+	}
+
+	if (IS_ENABLED(CONFIG_LORA_GFSK) && data->gfsk) {
+		/*
+		 * A GFSK frame is preamble, sync word, an optional length
+		 * byte, the payload and an optional CRC, all clocked out at
+		 * the configured bit rate.
+		 */
+		uint32_t pld_len =
+			data->gfsk_config.fixed_len ? data->gfsk_config.payload_len : data_len;
+		uint32_t bits = (data->gfsk_config.preamble_len + data->gfsk_config.sync_word_len +
+				 (data->gfsk_config.fixed_len ? 0 : 1) + pld_len +
+				 (data->gfsk_config.packet_crc_disable ? 0 : 2)) *
+				BITS_PER_BYTE;
+
+		return DIV_ROUND_UP(bits * MSEC_PER_SEC, data->gfsk_config.bitrate);
 	}
 
 	/* Calculate symbol time in microseconds */
@@ -1366,6 +1519,20 @@ static uint32_t sx126x_lora_airtime(const struct device *dev, uint32_t data_len)
 
 	/* Total airtime in milliseconds */
 	return (t_preamble_us + t_payload_us + 500) / 1000;
+}
+
+static int sx126x_lora_rssi(const struct device *dev, int16_t *rssi)
+{
+	uint8_t buf[1];
+	int ret;
+
+	ret = sx126x_hal_read_cmd(dev, SX126X_CMD_GET_RSSI_INST, buf, 1);
+	if (ret == 0) {
+		/* RSSI is -value/2 dBm */
+		*rssi = -((int16_t)buf[0] >> 1);
+	}
+
+	return ret;
 }
 
 static int sx126x_lora_test_cw(const struct device *dev, uint32_t frequency,
@@ -1427,13 +1594,18 @@ out_unlock:
 
 static DEVICE_API(lora, sx126x_lora_api) = {
 	.config = sx126x_lora_config,
+#ifdef CONFIG_LORA_GFSK
+	.config_gfsk = sx126x_lora_config_gfsk,
+#endif
 	.send = sx126x_lora_send,
 	.send_async = sx126x_lora_send_async,
 	.recv = sx126x_lora_recv,
 	.recv_async = sx126x_lora_recv_async,
+	.recv_duty_cycle = sx126x_lora_recv_duty_cycle,
 	.recv_duty_cycle_async = sx126x_lora_recv_duty_cycle_async,
 	.airtime = sx126x_lora_airtime,
 	.test_cw = sx126x_lora_test_cw,
+	.rssi = sx126x_lora_rssi,
 };
 
 #ifdef CONFIG_PM_DEVICE

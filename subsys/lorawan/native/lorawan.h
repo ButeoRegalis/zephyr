@@ -23,7 +23,7 @@ enum lwan_flag {
 	LWAN_FLAG_COUNT,
 };
 
-#define LWAN_MAX_CHANNELS	16
+#define LWAN_MAX_CHANNELS	CONFIG_LORAWAN_NATIVE_MAX_CHANNELS
 
 struct lwan_session {
 	/* Device address assigned during join */
@@ -46,9 +46,39 @@ struct lwan_session {
 	uint32_t fcnt_down;
 };
 
+/*
+ * MAC-layer state driven by LoRaWAN MAC commands and the ADR algorithm.
+ * Separate from @ref lwan_session because it survives re-joins and is
+ * mutated from the network side (LinkADRReq etc.) as well as from the
+ * application (lorawan_enable_adr).
+ */
+struct lwan_mac_state {
+	/* Opt-in to network-managed DR/power: sets FCtrl.ADR on uplinks */
+	bool adr_enabled;
+	/* Current TX power index (0 = region max; set by LinkADRReq) */
+	uint8_t tx_power_idx;
+
+	/* UL: a LinkCheckReq is queued and should ride on the next uplink */
+	bool link_check_pending;
+	/* UL: snapshot recorded by mac_cmd_build_ul_fopts() so a successful
+	 * TX (commit) can drop the request while a failed TX (no commit)
+	 * leaves it queued for a retry
+	 */
+	bool ul_built_link_check_req;
+
+	/* DL: most-recent LinkCheckAns payload awaiting delivery to the
+	 * registered application callback on the system workqueue
+	 */
+	bool link_check_ans_valid;
+	uint8_t link_check_margin;
+	uint8_t link_check_gw_cnt;
+};
+
 struct lwan_ctx {
 	/* Current session keys and counters */
 	struct lwan_session session;
+	/* MAC-layer state (driven by MAC commands / ADR) */
+	struct lwan_mac_state mac;
 	/* Region-specific operations (channel plan, DR tables) */
 	const struct lwan_region_ops *region;
 	/* Configured channel list */

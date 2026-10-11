@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "pinctrl/m3351-pinctrl.h"
+#include <pinctrl/m3351-pinctrl.h>
 
 &pinctrl {
 	uart0_default: uart0_default {
@@ -22,6 +22,13 @@
 				 <PB2MFP_UART1_RXD>,
 				 <PB3MFP_UART1_TXD>,
 				 <PC4MFP_GPIO>;
+		};
+	};
+
+	i2c0_default: i2c0_default {
+		group0 {
+			pinmux = <PC0MFP_I2C0_SDA>,  /* UNO D14 */
+				 <PC1MFP_I2C0_SCL>;  /* UNO D15 */
 		};
 	};
 };

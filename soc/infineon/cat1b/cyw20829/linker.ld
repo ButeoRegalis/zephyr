@@ -45,8 +45,8 @@
 #define ROM_SIZE (CONFIG_FLASH_SIZE * 1024 - CONFIG_FLASH_LOAD_OFFSET - ROM_END_OFFSET)
 #endif
 
-#define RAM_SIZE (CONFIG_SRAM_SIZE * 1K)
-#define RAM_ADDR CONFIG_SRAM_BASE_ADDRESS
+#define RAM_ADDR DT_CHOSEN_SRAM_ADDR
+#define RAM_SIZE DT_CHOSEN_SRAM_SIZE
 
 #if defined(CONFIG_CUSTOM_SECTION_ALIGN)
 _region_min_align = CONFIG_CUSTOM_SECTION_MIN_ALIGN_SIZE;
@@ -174,7 +174,7 @@ SECTIONS
 
 	__text_region_end = .;
 
-#if defined (CONFIG_CPP)
+#if defined (CONFIG_CPP) || defined(CONFIG_RUST) || defined(CONFIG_ARCH_STACKWALK)
 	SECTION_PROLOGUE(.ARM.extab,,)
 	{
 	/*
@@ -482,7 +482,6 @@ GROUP_END(DTCM)
 
 #include <zephyr/linker/debug-sections.ld>
 
-	/DISCARD/ : { *(.note.GNU-stack) }
 
 	SECTION_PROLOGUE(.ARM.attributes, 0,)
 	{

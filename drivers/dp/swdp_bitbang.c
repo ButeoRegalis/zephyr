@@ -484,9 +484,11 @@ static int sw_get_pins(const struct device *dev, uint8_t *const state)
 	const struct sw_config *config = dev->config;
 	uint32_t val;
 
+	*state = 0;
+
 	if (config->reset.port) {
 		val = gpio_pin_get_dt(&config->reset);
-		*state = val ? BIT(SWDP_nRESET_PIN) : 0;
+		*state |= val ? BIT(SWDP_nRESET_PIN) : 0;
 	}
 
 	val = gpio_pin_get_dt(&config->dio);
@@ -523,7 +525,7 @@ static int sw_set_clock(const struct device *dev, const uint32_t clock)
 
 	sw_data->clock_delay = delay;
 
-	LOG_WRN("cpu_clock %d, delay %d", CPU_CLOCK, sw_data->clock_delay);
+	LOG_DBG("cpu_clock %d, delay %d", CPU_CLOCK, sw_data->clock_delay);
 
 	return 0;
 }
@@ -573,14 +575,27 @@ static int sw_port_on(const struct device *dev)
 		}
 	}
 
-	ret = gpio_pin_configure_dt(&config->clk, GPIO_OUTPUT_ACTIVE);
+	ret = gpio_pin_configure_dt(&config->clk, GPIO_INPUT | GPIO_OUTPUT_ACTIVE);
+	if (ret == -ENOTSUP) {
+		LOG_DBG("Fall back to CLK output only");
+		ret = gpio_pin_configure_dt(&config->clk, GPIO_OUTPUT_ACTIVE);
+	}
+
 	if (ret) {
+		LOG_ERR("Failed to configure CLK GPIO");
 		return ret;
 	}
 
 	if (config->reset.port) {
-		ret = gpio_pin_configure_dt(&config->reset, GPIO_OUTPUT_INACTIVE);
+		ret = gpio_pin_configure_dt(&config->reset,
+					    GPIO_INPUT | GPIO_OUTPUT_INACTIVE);
+		if (ret == -ENOTSUP) {
+			LOG_DBG("Fall back to RESET output only");
+			ret = gpio_pin_configure_dt(&config->reset, GPIO_OUTPUT_INACTIVE);
+		}
+
 		if (ret) {
+			LOG_ERR("Failed to configure RESET GPIO");
 			return ret;
 		}
 	}
@@ -592,6 +607,8 @@ static int sw_port_off(const struct device *dev)
 {
 	const struct sw_config *config = dev->config;
 	int ret;
+	const gpio_flags_t off_flags = IS_ENABLED(CONFIG_SWDP_BITBANG_NO_DISCONNECT) ?
+		GPIO_INPUT : GPIO_DISCONNECTED;
 
 	/* If there is a transceiver connected to IO, pins should always be driven. */
 	if (config->dnoe.port) {
@@ -613,13 +630,13 @@ static int sw_port_off(const struct device *dev)
 		}
 	} else {
 		if (config->dout.port) {
-			ret = gpio_pin_configure_dt(&config->dout, GPIO_DISCONNECTED);
+			ret = gpio_pin_configure_dt(&config->dout, off_flags);
 			if (ret) {
 				return ret;
 			}
 		}
 
-		ret = gpio_pin_configure_dt(&config->dio, GPIO_DISCONNECTED);
+		ret = gpio_pin_configure_dt(&config->dio, off_flags);
 		if (ret) {
 			return ret;
 		}
@@ -638,7 +655,7 @@ static int sw_port_off(const struct device *dev)
 		}
 
 	} else {
-		ret = gpio_pin_configure_dt(&config->clk, GPIO_DISCONNECTED);
+		ret = gpio_pin_configure_dt(&config->clk, off_flags);
 		if (ret) {
 			return ret;
 		}
@@ -648,7 +665,7 @@ static int sw_port_off(const struct device *dev)
 		ret = gpio_pin_configure_dt(&config->reset,
 					    config->keep_reset_deast
 						    ? GPIO_OUTPUT_INACTIVE
-						    : GPIO_DISCONNECTED);
+						    : off_flags);
 		if (ret) {
 			return ret;
 		}

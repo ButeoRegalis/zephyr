@@ -7,8 +7,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-#ifndef ZEPHYR_INCLUDE_BLUETOOTH_L2CAP_BR_H_
-#define ZEPHYR_INCLUDE_BLUETOOTH_L2CAP_BR_H_
+#ifndef ZEPHYR_INCLUDE_BLUETOOTH_CLASSIC_L2CAP_BR_H_
+#define ZEPHYR_INCLUDE_BLUETOOTH_CLASSIC_L2CAP_BR_H_
 
 /**
  * @brief Bluetooth Logical Link Control and Adaptation Protocol (L2CAP) for BR/EDR
@@ -229,7 +229,8 @@ int bt_l2cap_br_connless_unregister(struct bt_l2cap_br_connless_cb *cb);
  * a specific PSM without establishing the L2CAP channel connection.
  *
  * The application is required to have reserved @ref BT_L2CAP_CONNLESS_RESERVE bytes
- * in the buffer before sending.
+ * in the buffer before sending. On error, the application still owns @p buf and gets it
+ * back unchanged.
  *
  * @param conn Connection object.
  * @param psm Protocol/Service Multiplexer identifying the destination service.
@@ -255,4 +256,4 @@ int bt_l2cap_br_connless_send(struct bt_conn *conn, uint16_t psm, struct net_buf
  * @}
  */
 
-#endif /* ZEPHYR_INCLUDE_BLUETOOTH_L2CAP_BR_H_ */
+#endif /* ZEPHYR_INCLUDE_BLUETOOTH_CLASSIC_L2CAP_BR_H_ */

@@ -76,6 +76,15 @@ static K_FIFO_DEFINE(bt_hci_tx_queue);
 UDC_BUF_POOL_DEFINE(bt_hci_ep_pool,
 		    3, USBD_MAX_BULK_MPS,
 		    sizeof(struct udc_buf_info), NULL);
+
+/*
+ * The TX queue carries Controller-to-Host ACL data and events. Size the
+ * pool for the largest complete HCI packet.
+ */
+UDC_BUF_POOL_DEFINE(bt_hci_tx_pool,
+		    2, MAX(BT_BUF_ACL_RX_SIZE, BT_BUF_EVT_RX_SIZE),
+		    sizeof(struct udc_buf_info), NULL);
+
 /* HCI RX/TX threads */
 static K_KERNEL_STACK_DEFINE(rx_thread_stack, CONFIG_BT_HCI_TX_STACK_SIZE);
 static struct k_thread rx_thread_data;
@@ -110,8 +119,8 @@ struct usbd_bt_hci_desc {
 struct bt_hci_data {
 	struct net_buf *acl_buf;
 	struct usbd_bt_hci_desc *const desc;
-	const struct usb_desc_header **const fs_desc;
-	const struct usb_desc_header **const hs_desc;
+	const struct usb_desc_header *const *const fs_desc;
+	const struct usb_desc_header *const *const hs_desc;
 	uint16_t acl_len;
 	struct k_sem sync_sem;
 	atomic_t state;
@@ -180,13 +189,17 @@ static void bt_hci_tx_sync_in(struct usbd_class_data *const c_data,
 			      struct net_buf *const bt_buf, const uint8_t ep)
 {
 	struct bt_hci_data *hci_data = usbd_class_get_private(c_data);
+	struct udc_buf_info *bi;
 	struct net_buf *buf;
 
-	buf = bt_hci_buf_alloc(ep);
+	buf = net_buf_alloc(&bt_hci_tx_pool, K_NO_WAIT);
 	if (buf == NULL) {
 		LOG_ERR("Failed to allocate buffer");
 		return;
 	}
+
+	bi = udc_get_buf_info(buf);
+	bi->ep = ep;
 
 	net_buf_add_mem(buf, bt_buf->data, bt_buf->len);
 	if (usbd_ep_enqueue(c_data, buf)) {
@@ -341,14 +354,12 @@ static int bt_hci_acl_out_cb(struct usbd_class_data *const c_data,
 
 		if (hci_data->acl_len == 0) {
 			LOG_ERR("Failed to get packet length");
-			net_buf_unref(hci_data->acl_buf);
-			hci_data->acl_buf = NULL;
+			net_buf_drop(&hci_data->acl_buf);
 		}
 	} else {
 		if (net_buf_tailroom(hci_data->acl_buf) < buf->len) {
 			LOG_ERR("Buffer tailroom too small");
-			net_buf_unref(hci_data->acl_buf);
-			hci_data->acl_buf = NULL;
+			net_buf_drop(&hci_data->acl_buf);
 			goto restart_out_transfer;
 		}
 
@@ -436,8 +447,15 @@ static int bt_hci_ctd(struct usbd_class_data *const c_data,
 
 	/* We expect host-to-device class request */
 	if (setup->RequestType.type != USB_REQTYPE_TYPE_CLASS) {
-		errno = -ENOTSUP;
+		return -ENOTSUP;
+	}
 
+	if (setup->wLength == 0) {
+		return -ENOTSUP;
+	}
+
+	if (buf == NULL) {
+		/* Data OUT can be received */
 		return 0;
 	}
 
@@ -456,8 +474,8 @@ static int bt_hci_ctd(struct usbd_class_data *const c_data,
 	return 0;
 }
 
-static void *bt_hci_get_desc(struct usbd_class_data *const c_data,
-			     const enum usbd_speed speed)
+static const void *bt_hci_get_desc(struct usbd_class_data *const c_data,
+				   const enum usbd_speed speed)
 {
 	struct bt_hci_data *data = usbd_class_get_private(c_data);
 
@@ -475,7 +493,7 @@ static int bt_hci_init(struct usbd_class_data *const c_data)
 	return 0;
 }
 
-static struct usbd_class_api bt_hci_api = {
+static const struct usbd_class_api bt_hci_api = {
 	.request = bt_hci_request,
 	.update = bt_hci_update,
 	.enable = bt_hci_enable,
@@ -620,7 +638,7 @@ static struct usbd_bt_hci_desc bt_hci_desc_##n = {				\
 	},									\
 };										\
 										\
-const static struct usb_desc_header *bt_hci_fs_desc_##n[] = {			\
+const static struct usb_desc_header *const bt_hci_fs_desc_##n[] = {		\
 	(struct usb_desc_header *) &bt_hci_desc_##n.iad,			\
 	(struct usb_desc_header *) &bt_hci_desc_##n.if0,			\
 	(struct usb_desc_header *) &bt_hci_desc_##n.if0_int_ep,			\
@@ -635,7 +653,7 @@ const static struct usb_desc_header *bt_hci_fs_desc_##n[] = {			\
 	(struct usb_desc_header *) &bt_hci_desc_##n.nil_desc,			\
 };										\
 										\
-const static __maybe_unused struct usb_desc_header *bt_hci_hs_desc_##n[] = {	\
+const static __maybe_unused struct usb_desc_header *const bt_hci_hs_desc_##n[] = {	\
 	(struct usb_desc_header *) &bt_hci_desc_##n.iad,			\
 	(struct usb_desc_header *) &bt_hci_desc_##n.if0,			\
 	(struct usb_desc_header *) &bt_hci_desc_##n.if0_int_ep,			\

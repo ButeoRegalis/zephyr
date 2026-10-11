@@ -42,6 +42,11 @@ static int mcumgr_serial_extract_len(struct mcumgr_serial_rx_ctxt *rx_ctxt)
 	}
 
 	rx_ctxt->pkt_len = net_buf_pull_be16(rx_ctxt->nb);
+
+	if (rx_ctxt->pkt_len <= sizeof(uint16_t)) {
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -70,6 +75,12 @@ static inline bool mcumgr_serial_process_frag_raw(struct mcumgr_serial_rx_ctxt *
 							     struct smp_hdr *rec_hdr)
 {
 	uint16_t total_size;
+
+	if (frag_len > net_buf_tailroom(rx_ctxt->nb)) {
+		/* Payload is too large to fit into buffer. */
+		mcumgr_serial_free_rx_ctxt(rx_ctxt);
+		return false;
+	}
 
 	net_buf_add_mem(rx_ctxt->nb, frag, frag_len);
 
@@ -129,10 +140,10 @@ struct net_buf *mcumgr_serial_process_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt
 
 	if (rx_ctxt->nb == NULL) {
 		rx_ctxt->nb = smp_packet_alloc();
-		net_buf_reset(rx_ctxt->nb);
 		if (rx_ctxt->nb == NULL) {
 			return NULL;
 		}
+		net_buf_reset(rx_ctxt->nb);
 	}
 
 #if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE) && \
@@ -153,7 +164,7 @@ struct net_buf *mcumgr_serial_process_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt
 			return NULL;
 		}
 
-		op = sys_be16_to_cpu(*(uint16_t *)frag);
+		op = sys_get_be16(frag);
 		switch (op) {
 		case MCUMGR_SERIAL_HDR_PKT:
 			net_buf_reset(rx_ctxt->nb);

@@ -109,11 +109,15 @@ config GEN_UICR_PROTECTEDMEM
 
 config GEN_UICR_PROTECTEDMEM_SIZE_BYTES
 	int "Protected memory size in bytes"
+	default $(dt_nodelabel_reg_size_int,protectedmem_partition) \
+		if $(dt_nodelabel_enabled,protectedmem_partition)
 	default 4096
 	depends on GEN_UICR_PROTECTEDMEM
 	help
 	  Size of the protected memory region in bytes.
 	  This value must be divisible by 4096 (4 kiB).
+	  The size is taken from the device tree node with label 'protectedmem_partition',
+	  if defined.
 
 config GEN_UICR_MPCCONF
 	bool "UICR.MPCCONF"
@@ -223,6 +227,7 @@ config GEN_UICR_SECONDARY_WDTSTART_CRV
 
 config GEN_UICR_SECONDARY
 	bool "UICR.SECONDARY.ENABLE"
+	depends on $(dt_nodelabel_enabled,secondary_partition)
 
 if GEN_UICR_SECONDARY
 
@@ -316,11 +321,15 @@ config GEN_UICR_SECONDARY_PROTECTEDMEM
 
 config GEN_UICR_SECONDARY_PROTECTEDMEM_SIZE_BYTES
 	int "Secondary protected memory size in bytes"
+	default $(dt_nodelabel_reg_size_int,secondary_protectedmem_partition) \
+		if $(dt_nodelabel_enabled,secondary_protectedmem_partition)
 	default 4096
 	depends on GEN_UICR_SECONDARY_PROTECTEDMEM
 	help
 	  Size of the secondary protected memory region in bytes.
 	  This value must be divisible by 4096 (4 kiB).
+	  The size is taken from the device tree node with label
+	  'secondary_protectedmem_partition', if defined.
 
 config GEN_UICR_SECONDARY_MPCCONF
 	bool "UICR.SECONDARY.MPCCONF"
@@ -435,5 +444,10 @@ index = 6
 rsource "Kconfig.template.gen_uicr_snapshot_region"
 
 endif # GEN_UICR_SNAPSHOT_REGIONS
+
+config GEN_UICR_IRONSIDE_SE_PERIPHCONF_REGISTERS_FILE
+	string "Ironside SE PERIPHCONF registers file"
+	default "${IRONSIDE_SUPPORT_DIR}/se/resources/periphconf_registers-nrf54h20_xxaa-v23.4.0+27.json" \
+		if SOC_NRF54H20
 
 endmenu

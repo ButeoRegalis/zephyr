@@ -11,6 +11,23 @@ static int quic_connection_init(struct quic_context *ctx,
 	struct quic_endpoint *ep;
 	int ret;
 
+	if (remote_addr != NULL) {
+		/*
+		 * Drop any orphaned client endpoints for this remote first so
+		 * we do not exhaust the endpoint pool or leave stale UDP
+		 * sockets behind from a prior failed client open. This must
+		 * happen before contexts_lock is taken: releasing an endpoint
+		 * cancels its PTO work synchronously and the PTO handler
+		 * itself takes contexts_lock, so running the cleanup with the
+		 * lock held can deadlock against a PTO that is firing.
+		 */
+		quic_release_orphan_client_endpoints(remote_addr);
+	}
+
+	/* Take the locks in the same order as quic_endpoint_unref():
+	 * contexts_lock before endpoints_lock.
+	 */
+	k_mutex_lock(&contexts_lock, K_FOREVER);
 	k_mutex_lock(&endpoints_lock, K_FOREVER);
 
 	if (remote_addr == NULL) {
@@ -20,6 +37,7 @@ static int quic_connection_init(struct quic_context *ctx,
 			ep = alloc_local_endpoint(ctx, local_addr);
 			if (ep == NULL) {
 				k_mutex_unlock(&endpoints_lock);
+				k_mutex_unlock(&contexts_lock);
 				return -ENOMEM;
 			}
 
@@ -33,39 +51,46 @@ static int quic_connection_init(struct quic_context *ctx,
 						&net_sin(local_addr)->sin_addr));
 		}
 	} else {
-		ep = find_endpoint(remote_addr, local_addr, NULL, 0, NULL, 0);
+		/* Always allocate a dedicated client endpoint per connection
+		 * context. Orphans from prior failed opens were dropped above.
+		 */
+		ep = alloc_endpoint(ctx, remote_addr, local_addr);
 		if (ep == NULL) {
-			ep = alloc_endpoint(ctx, remote_addr, local_addr);
-			if (ep == NULL) {
-				k_mutex_unlock(&endpoints_lock);
-				return -ENOMEM;
-			}
-
-			ep->is_server = false;
-			ctx->listen = NULL;
-			ctx->is_listening = false;
-
-			/* For client, generate random connection IDs:
-			 * - peer_cid: DCID sent to server (server's CID from client's perspective)
-			 * - my_cid: SCID we use to identify ourselves
-			 */
-			ep->peer_cid_len = 8;
-			sys_rand_get(ep->peer_cid, ep->peer_cid_len);
-
-			ep->my_cid_len = 8;
-			sys_rand_get(ep->my_cid, ep->my_cid_len);
-
-			NET_DBG("[EP:%p/%d] Created new endpoint from %s to %s", ep,
-				quic_get_by_ep(ep), local_addr == NULL ? "ANY" :
-				net_sprint_addr(local_addr->sa_family,
-						&net_sin(local_addr)->sin_addr),
-				net_sprint_addr(remote_addr->sa_family,
-						&net_sin(remote_addr)->sin_addr));
+			k_mutex_unlock(&endpoints_lock);
+			k_mutex_unlock(&contexts_lock);
+			return -ENOMEM;
 		}
+
+		ep->is_server = false;
+		ctx->listen = NULL;
+		ctx->is_listening = false;
+
+		ret = quic_client_endpoint_init_cids(ep, remote_addr);
+		if (ret < 0) {
+			NET_DBG("[EP:%p/%d] Cannot generate connection IDs (%d)",
+				ep, quic_get_by_ep(ep), ret);
+			goto fail;
+		}
+
+		NET_DBG("[EP:%p/%d] Created new endpoint from %s to %s", ep,
+			quic_get_by_ep(ep), local_addr == NULL ? "ANY" :
+			net_sprint_addr(local_addr->sa_family,
+					&net_sin(local_addr)->sin_addr),
+			net_sprint_addr(remote_addr->sa_family,
+					&net_sin(remote_addr)->sin_addr));
 	}
 
 	ctx->stream_id_counter = 0ULL;
 	ctx->id = connection_ids++;
+
+#if defined(CONFIG_NET_STATISTICS_QUIC)
+	if (!ctx->is_listening) {
+		ctx->stats_is_server = ep->is_server;
+		memcpy(&ctx->stats_local_addr, &ep->local_addr, sizeof(ctx->stats_local_addr));
+		memcpy(&ctx->stats_remote_addr, &ep->remote_addr, sizeof(ctx->stats_remote_addr));
+		ctx->stats_metadata_valid = true;
+	}
+#endif /* CONFIG_NET_STATISTICS_QUIC */
 
 	/* Create the actual UDP socket here and do the QUIC handshake.
 	 */
@@ -120,6 +145,7 @@ static int quic_connection_init(struct quic_context *ctx,
 	}
 
 	k_mutex_unlock(&endpoints_lock);
+	k_mutex_unlock(&contexts_lock);
 
 	NET_DBG("[CO:%p/%d] Connection initialized", ctx, quic_get_by_conn(ctx));
 
@@ -127,9 +153,15 @@ static int quic_connection_init(struct quic_context *ctx,
 
 fail:
 	sys_slist_find_and_remove(&ctx->endpoints, &ep->node);
-	quic_endpoint_unref(ep);
 
 	k_mutex_unlock(&endpoints_lock);
+	k_mutex_unlock(&contexts_lock);
+
+	/* Release only after the locks are dropped: the final unref cancels
+	 * the endpoint's PTO work synchronously, and the PTO handler takes
+	 * contexts_lock, so releasing under the lock can deadlock.
+	 */
+	quic_endpoint_unref(ep);
 
 	NET_DBG("[CO:%p/%d] Connection initialization failed (%d)",
 		ctx, quic_get_by_conn(ctx), ret);
@@ -150,7 +182,8 @@ static int quic_getsockopt_ctx(void *obj, int level, int optname,
 		ep = SYS_SLIST_PEEK_HEAD_CONTAINER(&ctx->endpoints, ep, node);
 	}
 
-	if (level != ZSOCK_SOL_TLS && level != ZSOCK_SOL_SOCKET) {
+	if (level != ZSOCK_SOL_TLS && level != ZSOCK_SOL_SOCKET &&
+	    level != ZSOCK_SOL_QUIC) {
 		/* If we have not created any endpoint yet, the socket options
 		 * cannot be applied.
 		 */
@@ -168,6 +201,37 @@ static int quic_getsockopt_ctx(void *obj, int level, int optname,
 	}
 
 	switch (level) {
+	case ZSOCK_SOL_QUIC:
+		switch (optname) {
+		case ZSOCK_QUIC_SO_SESSION_STATE: {
+			struct quic_session_state *state = optval;
+			int ret;
+
+			if (ep == NULL) {
+				errno = ENOTCONN;
+				return -1;
+			}
+
+			if (*optlen < sizeof(*state)) {
+				errno = ENOBUFS;
+				return -1;
+			}
+
+			ret = quic_tls_get_session_state(&ep->crypto.tls, state);
+			if (ret < 0) {
+				errno = -ret;
+				return -1;
+			}
+
+			*optlen = sizeof(*state);
+			return 0;
+		}
+
+		default:
+			break;
+		}
+		break;
+
 	case ZSOCK_SOL_TLS:
 		switch (optname) {
 		case ZSOCK_TLS_ALPN_LIST: {
@@ -353,6 +417,41 @@ static int quic_setsockopt_ctx(void *obj, int level, int optname,
 
 			break;
 
+		case ZSOCK_QUIC_SO_SESSION_STATE:
+			if (optval == NULL || optlen != sizeof(struct quic_session_state)) {
+				err = -EINVAL;
+				break;
+			}
+
+			err = quic_tls_set_session_state(&ep->crypto.tls, optval);
+			break;
+
+		case ZSOCK_QUIC_SO_SESSION_TICKET_ENABLE:
+			if (!ep->is_server || optval == NULL || optlen != sizeof(int)) {
+				err = -EINVAL;
+				break;
+			}
+
+			ep->crypto.tls.issue_session_tickets = *(const int *)optval != 0;
+			err = 0;
+			break;
+
+		case ZSOCK_QUIC_SO_MAX_EARLY_DATA_SIZE:
+			if (!ep->is_server || optval == NULL || optlen != sizeof(uint32_t)) {
+				err = -EINVAL;
+				break;
+			}
+
+			if (!IS_ENABLED(CONFIG_QUIC_0RTT) &&
+			    *(const uint32_t *)optval > 0U) {
+				err = -ENOTSUP;
+				break;
+			}
+
+			ep->crypto.tls.max_early_data_size = *(const uint32_t *)optval;
+			err = 0;
+			break;
+
 		default:
 			err = -ENOPROTOOPT;
 			break;
@@ -421,6 +520,27 @@ out:
 	return 0;
 }
 
+/*
+ * Drain any peer-initiated streams that were received but never accepted via
+ * zsock_accept(). Each such stream holds a reference to its parent context;
+ * if these references are not released here, ctx->refcount will never reach
+ * zero and the context leaks.
+ *
+ * stream->ep is cleared before the unref so that quic_stream_unref() does
+ * not try to send MAX_STREAMS frames on a connection that is already closing.
+ */
+static void quic_ctx_drain_incoming_streams(struct quic_context *ctx)
+{
+	struct quic_stream *stream;
+
+	while ((stream = k_fifo_get(&ctx->incoming.stream_q, K_NO_WAIT)) != NULL) {
+		NET_DBG("[CO:%p/%d] Releasing unaccepted stream %" PRIu64,
+			ctx, quic_get_by_conn(ctx), stream->id);
+		stream->ep = NULL;
+		quic_stream_unref(stream);
+	}
+}
+
 static int quic_ctx_close_vmeth(void *obj)
 {
 	struct quic_context *ctx = obj;
@@ -435,15 +555,21 @@ static int quic_ctx_close_vmeth(void *obj)
 	(void)sock_obj_core_dealloc(ctx->sock);
 
 	/*
-	 * Clear ctx->sock before calling quic_context_unref so that the
-	 * ref=0 path in quic_context_unref doesn't call zsock_close() on
-	 * the same fd that's already being torn down by the outer zsock_close().
+	 * Clear ctx->sock before draining and before calling quic_context_unref
+	 * so that the ref=0 path in quic_context_unref doesn't call zsock_close()
+	 * on the same fd that's already being torn down by the outer zsock_close().
 	 * Zephyr's zvfs_close() removes the fd from the table before calling
 	 * the vtable close, so zvfs_get_fd_obj() inside quic_connection_close()
 	 * would return NULL and silently skip the unref which would leak the
 	 * context.
 	 */
 	ctx->sock = -1;
+
+	/*
+	 * Release any unaccepted incoming streams. Each holds a context ref;
+	 * without this, ctx->refcount stays elevated and the context leaks.
+	 */
+	quic_ctx_drain_incoming_streams(ctx);
 
 	quic_context_unref(ctx);
 
@@ -630,7 +756,11 @@ static int quic_ctx_ioctl_vmeth(void *obj, unsigned int request, va_list args)
 static bool quic_stream_can_send(struct quic_stream *stream)
 {
 	struct quic_endpoint *ep = stream->ep;
-	size_t tx_free = sizeof(stream->tx_buf.data) - stream->tx_buf.len;
+	size_t tx_free;
+
+	k_mutex_lock(&stream->tx_lock, K_FOREVER);
+	tx_free = sizeof(stream->tx_buf.data) - stream->tx_buf.len;
+	k_mutex_unlock(&stream->tx_lock);
 
 	/* Check TX retransmit buffer space. We need meaningful space, not just 1 byte */
 	if (tx_free < 64) {
@@ -794,6 +924,31 @@ static int quic_stream_ioctl_vmeth(void *obj, unsigned int request, va_list args
 	return 0;
 }
 
+static int quic_wait_for_application_send_ready(struct quic_endpoint *ep,
+						enum quic_secret_level level)
+{
+	int ret;
+
+	if (ep == NULL || level != QUIC_SECRET_LEVEL_APPLICATION ||
+	    ep->crypto.application.initialized || ep->handshake.completed) {
+		return 0;
+	}
+
+	ret = k_sem_take(&ep->handshake.sem, K_MSEC(ep->handshake.timeout_ms));
+	if (ret != 0) {
+		return -ETIMEDOUT;
+	}
+
+	/* Preserve the completion signal for any later waiters. */
+	k_sem_give(&ep->handshake.sem);
+
+	if (!ep->handshake.completed || !ep->crypto.application.initialized) {
+		return -ENOTCONN;
+	}
+
+	return 0;
+}
+
 /**
  * Send a STREAM frame with the FIN bit set and zero payload.
  * This signals to the peer that we have finished sending on this stream.
@@ -802,7 +957,9 @@ static int quic_stream_ioctl_vmeth(void *obj, unsigned int request, va_list args
 static int quic_send_stream_fin(struct quic_stream *stream)
 {
 	uint8_t frame[32]; /* 1 type + max 8 stream_id + max 8 offset + max 2 len */
+	enum quic_secret_level level;
 	size_t frame_len = 0;
+	uint64_t sent_pn;
 	int ret;
 
 	if (stream->ep == NULL) {
@@ -840,8 +997,13 @@ static int quic_send_stream_fin(struct quic_stream *stream)
 	}
 	frame_len += quic_get_varint_size(0ULL);
 
-	ret = quic_send_packet(stream->ep, QUIC_SECRET_LEVEL_APPLICATION,
-			       frame, frame_len);
+	level = quic_stream_send_level(stream->ep);
+	ret = quic_wait_for_application_send_ready(stream->ep, level);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = quic_send_packet_with_pn(stream->ep, level, frame, frame_len, &sent_pn);
 	if (ret < 0) {
 		NET_DBG("[ST:%p/%d] Failed to send FIN for stream %" PRIu64 " : %d",
 			stream, quic_get_by_stream(stream), stream->id, ret);
@@ -849,12 +1011,248 @@ static int quic_send_stream_fin(struct quic_stream *stream)
 	}
 
 	/* Annotate the packet for loss recovery / retransmission tracking */
-	quic_annotate_last_sent_stream(stream->ep, QUIC_SECRET_LEVEL_APPLICATION,
-				       stream->id, stream->bytes_sent,
-				       0 /* data_len */, true /* stream_fin */);
+	quic_annotate_sent_stream(stream->ep, level, sent_pn,
+				  stream->id, stream->bytes_sent,
+				  0 /* data_len */, true /* stream_fin */);
 
 	NET_DBG("[ST:%p/%d] Sent FIN for stream %" PRIu64 " at offset %" PRIu64,
 		stream, quic_get_by_stream(stream), stream->id, stream->bytes_sent);
+
+	return 0;
+}
+
+static uint64_t quic_stream_remote_tx_limit(const struct quic_endpoint *ep, uint64_t stream_id)
+{
+	bool local_initiator = (stream_id & 0x01U) == (ep->is_server ? 0x01U : 0x00U);
+	bool bidirectional = (stream_id & 0x02U) == 0U;
+
+	if (!bidirectional) {
+		return local_initiator ? ep->peer_params.initial_max_stream_data_uni : 0U;
+	}
+
+	return local_initiator ?
+		ep->peer_params.initial_max_stream_data_bidi_remote :
+		ep->peer_params.initial_max_stream_data_bidi_local;
+}
+
+static ssize_t quic_stream_replay_pending_data(struct quic_stream *stream)
+{
+	struct quic_endpoint *ep = stream->ep;
+	struct quic_stream_tx_buffer *tx = &stream->tx_buf;
+	enum quic_secret_level level;
+	size_t stream_window;
+	size_t conn_window;
+	size_t available_window;
+	size_t max_payload_size;
+	size_t queued_len;
+	size_t source_offset;
+	size_t to_send;
+	uint64_t this_offset;
+	uint64_t sent_pn;
+	uint8_t frame[CONFIG_QUIC_TX_BUFFER_SIZE];
+	size_t frame_len = 0;
+	int state;
+	int ret;
+
+	if (ep == NULL) {
+		return -ENOTCONN;
+	}
+
+	level = quic_stream_send_level(ep);
+	state = quic_stream_get_state(stream);
+	if (state == STATE_RESET_SENT || state == STATE_DATA_READ) {
+		return -EPIPE;
+	}
+
+	if (stream->bytes_sent < tx->base_offset ||
+	    stream->bytes_sent > tx->base_offset + tx->len) {
+		return -EINVAL;
+	}
+
+	queued_len = tx->len - (size_t)(stream->bytes_sent - tx->base_offset);
+	if (stream->bytes_sent >= stream->remote_max_data) {
+		stream_window = 0;
+	} else {
+		stream_window = stream->remote_max_data - stream->bytes_sent;
+	}
+
+	if (ep->tx_fc.bytes_sent >= ep->tx_fc.max_data) {
+		conn_window = 0;
+	} else {
+		conn_window = ep->tx_fc.max_data - ep->tx_fc.bytes_sent;
+	}
+
+	available_window = MIN(stream_window, conn_window);
+	if (available_window == 0U) {
+		if (stream_window == 0U) {
+			quic_send_stream_data_blocked(ep, stream);
+		}
+
+		if (conn_window == 0U) {
+			quic_send_data_blocked(ep);
+		}
+
+		return -EAGAIN;
+	}
+
+	/* Without a free sent-packet slot the packet could not be tracked,
+	 * and its stream data would never be released from the TX buffer
+	 * once acknowledged. Back off until an acknowledgment frees a slot.
+	 */
+	if (!quic_recovery_tx_slot_available(ep, level)) {
+		return -EAGAIN;
+	}
+
+	max_payload_size = MIN(sizeof(frame), ep->max_tx_payload_size);
+
+	{
+		size_t quic_overhead = 1 + ep->my_cid_len + 4 + QUIC_AEAD_TAG_LEN;
+		size_t stream_hdr = 1 + quic_get_varint_size(stream->id) +
+				    quic_get_varint_size(stream->bytes_sent) + 2;
+
+		if (max_payload_size > quic_overhead + stream_hdr) {
+			max_payload_size -= quic_overhead + stream_hdr;
+		} else {
+			max_payload_size = 0U;
+		}
+	}
+
+	to_send = MIN(queued_len, available_window);
+	to_send = MIN(to_send, max_payload_size);
+	if (to_send == 0U) {
+		return -EAGAIN;
+	}
+
+	this_offset = stream->bytes_sent;
+	source_offset = (size_t)(stream->bytes_sent - tx->base_offset);
+
+	frame[frame_len++] = QUIC_FRAME_TYPE_STREAM_BASE | 0x04 | 0x02;
+
+	ret = quic_put_len(&frame[frame_len], sizeof(frame) - frame_len, stream->id);
+	if (ret != 0) {
+		return -EINVAL;
+	}
+
+	frame_len += quic_get_varint_size(stream->id);
+
+	ret = quic_put_len(&frame[frame_len], sizeof(frame) - frame_len, stream->bytes_sent);
+	if (ret != 0) {
+		return -EINVAL;
+	}
+
+	frame_len += quic_get_varint_size(stream->bytes_sent);
+
+	ret = quic_put_len(&frame[frame_len], sizeof(frame) - frame_len, to_send);
+	if (ret != 0) {
+		return -EINVAL;
+	}
+
+	frame_len += quic_get_varint_size(to_send);
+
+	if (frame_len + to_send > sizeof(frame)) {
+		return -ENOBUFS;
+	}
+
+	memcpy(&frame[frame_len], &tx->data[source_offset], to_send);
+	frame_len += to_send;
+
+	ret = quic_send_packet_with_pn(ep, level, frame, frame_len, &sent_pn);
+	if (ret < 0) {
+		return ret;
+	}
+
+	stream->bytes_sent += to_send;
+	ep->tx_fc.bytes_sent += to_send;
+	quic_annotate_sent_stream(ep, level, sent_pn, stream->id, this_offset,
+				  (uint16_t)to_send, false);
+
+	return (ssize_t)to_send;
+}
+
+int quic_prepare_rejected_early_data_replay(struct quic_endpoint *ep)
+{
+	struct quic_context *ctx = quic_find_context(ep);
+	struct quic_stream *stream, *tmp;
+
+	if (!IS_ENABLED(CONFIG_QUIC_0RTT)) {
+		return 0;
+	}
+
+	if (ctx == NULL) {
+		return -ENOENT;
+	}
+
+	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&ctx->streams, stream, tmp, node) {
+		uint64_t outstanding;
+
+		if (stream->ep != ep) {
+			continue;
+		}
+
+		stream->remote_max_data = quic_stream_remote_tx_limit(ep, stream->id);
+
+		if (stream->bytes_sent <= stream->bytes_acked) {
+			continue;
+		}
+
+		outstanding = stream->bytes_sent - stream->bytes_acked;
+		if (outstanding > ep->tx_fc.bytes_sent) {
+			return -EOVERFLOW;
+		}
+
+		ep->tx_fc.bytes_sent -= outstanding;
+		stream->bytes_sent = stream->bytes_acked;
+	}
+
+	return 0;
+}
+
+int quic_replay_rejected_early_data(struct quic_endpoint *ep)
+{
+	struct quic_context *ctx = quic_find_context(ep);
+	struct quic_stream *stream, *tmp;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_QUIC_0RTT)) {
+		return 0;
+	}
+
+	if (ctx == NULL) {
+		return -ENOENT;
+	}
+
+	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&ctx->streams, stream, tmp, node) {
+		if (stream->ep != ep) {
+			continue;
+		}
+
+		while (stream->bytes_sent < stream->tx_buf.base_offset + stream->tx_buf.len) {
+			ret = quic_stream_replay_pending_data(stream);
+			if (ret == -EAGAIN) {
+				break;
+			}
+
+			if (ret < 0) {
+				return ret;
+			}
+		}
+
+		if (!stream->replay_fin_pending ||
+		    stream->bytes_sent != stream->tx_buf.base_offset + stream->tx_buf.len) {
+			continue;
+		}
+
+		ret = quic_send_stream_fin(stream);
+		if (ret == -EAGAIN) {
+			continue;
+		}
+
+		if (ret < 0) {
+			return ret;
+		}
+
+		stream->replay_fin_pending = false;
+	}
 
 	return 0;
 }
@@ -863,6 +1261,7 @@ static ssize_t quic_stream_send(struct quic_stream *stream, const uint8_t *buf,
 				size_t buf_len, int32_t timeout)
 {
 	struct quic_endpoint *ep;
+	enum quic_secret_level level;
 	size_t stream_window;
 	size_t conn_window;
 	size_t available_window;
@@ -874,12 +1273,18 @@ static ssize_t quic_stream_send(struct quic_stream *stream, const uint8_t *buf,
 	size_t max_payload_size;
 	size_t frame_len = 0;
 	uint8_t frame_type;
+	uint64_t sent_pn;
 	int state;
 	int ret;
 
 	ARG_UNUSED(timeout);
 
 	ep = stream->ep;
+	level = quic_stream_send_level(ep);
+	ret = quic_wait_for_application_send_ready(ep, level);
+	if (ret < 0) {
+		return ret;
+	}
 
 	/* Check if stream has a valid endpoint with crypto context */
 	if (ep == NULL) {
@@ -930,6 +1335,17 @@ static ssize_t quic_stream_send(struct quic_stream *stream, const uint8_t *buf,
 		return -EAGAIN;
 	}
 
+	/* Without a free sent-packet slot the packet could not be tracked,
+	 * and its stream data would never be released from the TX buffer
+	 * once acknowledged. Back off until an acknowledgment frees a slot;
+	 * the ACK processing raises the send signal so poll() wakes up.
+	 */
+	if (!quic_recovery_tx_slot_available(ep, level)) {
+		NET_DBG("[ST:%p/%d] Sent packet history full on stream %" PRIu64,
+			stream, quic_get_by_stream(stream), stream->id);
+		return -EAGAIN;
+	}
+
 	max_payload_size = MIN(sizeof(frame), ep->max_tx_payload_size);
 
 	/* Subtract QUIC packet-level overhead from max_payload_size.
@@ -960,14 +1376,12 @@ static ssize_t quic_stream_send(struct quic_stream *stream, const uint8_t *buf,
 	to_send = MIN(to_send, max_payload_size);
 
 	/* Also limit by TX retransmit buffer space */
+	k_mutex_lock(&stream->tx_lock, K_FOREVER);
 	tx = &stream->tx_buf;
 	tx_free = sizeof(tx->data) - tx->len;
 
 	if (tx_free == 0) {
-		/* Buffer full, peer is not ACKing fast enough.
-		 * Caller should retry; the PTO timer will eventually
-		 * unblock things by retransmitting stalled data.
-		 */
+		k_mutex_unlock(&stream->tx_lock);
 		NET_DBG("[ST:%p/%d] TX retransmit buffer full on stream %" PRIu64,
 			stream, quic_get_by_stream(stream), stream->id);
 		return -EAGAIN;
@@ -977,15 +1391,12 @@ static ssize_t quic_stream_send(struct quic_stream *stream, const uint8_t *buf,
 		to_send = tx_free;
 	}
 
-	/* Record the stream offset before updating bytes_sent */
 	this_offset = stream->bytes_sent;
+	k_mutex_unlock(&stream->tx_lock);
 
-	/* Copy into retransmit buffer BEFORE sending.
-	 * If the send fails the data is still here; it will be
-	 * retransmitted by the PTO or loss detection.
-	 */
-	memcpy(&tx->data[tx->len], buf, to_send);
-	tx->len += to_send;
+	if (to_send == 0) {
+		return -EAGAIN;
+	}
 
 	if (to_send != buf_len) {
 		NET_DBG("[ST:%p/%d] Limiting send from %zd to %zd bytes due to flow control/buffer",
@@ -1034,11 +1445,32 @@ static ssize_t quic_stream_send(struct quic_stream *stream, const uint8_t *buf,
 	memcpy(&frame[frame_len], buf, to_send);
 	frame_len += to_send;
 
+	/* Copy into retransmit buffer before sending. If the send fails the
+	 * data stays here for PTO / loss detection retransmission.
+	 */
+	k_mutex_lock(&stream->tx_lock, K_FOREVER);
+	memcpy(&tx->data[tx->len], buf, to_send);
+	tx->len += to_send;
+	k_mutex_unlock(&stream->tx_lock);
+
 	/* Send the packet */
-	ret = quic_send_packet(ep, QUIC_SECRET_LEVEL_APPLICATION, frame, frame_len);
+	ret = quic_send_packet_with_pn(ep, level, frame, frame_len, &sent_pn);
 	if (ret < 0) {
 		/* Roll back TX buffer on send failure */
-		tx->len -= to_send;
+		k_mutex_lock(&stream->tx_lock, K_FOREVER);
+		if (stream->bytes_sent == this_offset) {
+			size_t buf_off = (size_t)(this_offset - tx->base_offset);
+
+			if (buf_off < tx->len && buf_off + to_send <= tx->len) {
+				if (buf_off + to_send < tx->len) {
+					memmove(&tx->data[buf_off],
+						&tx->data[buf_off + to_send],
+						tx->len - buf_off - to_send);
+				}
+				tx->len -= to_send;
+			}
+		}
+		k_mutex_unlock(&stream->tx_lock);
 
 		NET_DBG("[ST:%p/%d] Failed to send STREAM frame: %d",
 			stream, quic_get_by_stream(stream), ret);
@@ -1052,9 +1484,9 @@ static ssize_t quic_stream_send(struct quic_stream *stream, const uint8_t *buf,
 	/* Annotate the sent_pkt ring-buffer entry with stream frame info
 	 * so loss detection knows what to retransmit.
 	 */
-	quic_annotate_last_sent_stream(ep, QUIC_SECRET_LEVEL_APPLICATION,
-				       stream->id, this_offset,
-				       (uint16_t)to_send, false);
+	quic_annotate_sent_stream(ep, level, sent_pn,
+				  stream->id, this_offset,
+				  (uint16_t)to_send, false);
 
 	NET_DBG("[ST:%p/%d] Sent %zd bytes, stream total=%" PRIu64 ", conn total=%" PRIu64,
 		stream, quic_get_by_stream(stream), to_send, stream->bytes_sent,
@@ -1311,6 +1743,10 @@ static int quic_stream_accept(struct quic_context *ctx, k_timeout_t timeout,
 	stream->sock = fd;
 	*new_stream = stream;
 
+	if (stream->rx_buf.head != stream->rx_buf.tail || stream->rx_buf.fin_received) {
+		k_poll_signal_raise(&stream->recv.signal, 0);
+	}
+
 	NET_DBG("[CO:%p/%d] Accepted stream %" PRIu64 " on fd %d",
 		ctx, quic_get_by_conn(ctx), stream->id, fd);
 
@@ -1353,6 +1789,8 @@ static int quic_connection_accept(struct quic_context *listen_ctx,
 
 	child_ctx->sock = fd;
 	*new_ctx_out = child_ctx;
+
+	quic_stats_update_connection_opened();
 
 	NET_DBG("[CO:%p/%d] Accepted connection context %p/%d on fd %d",
 		listen_ctx, quic_get_by_conn(listen_ctx),
@@ -1643,6 +2081,16 @@ static int quic_stream_getsockopt_ctx(void *obj, int level, int optname,
 			*(int *)optval = stream->type;
 			return 0;
 		}
+
+		case ZSOCK_QUIC_SO_STREAM_EARLY_DATA: {
+			if (*optlen != sizeof(int)) {
+				errno = EINVAL;
+				return -1;
+			}
+
+			*(int *)optval = stream->received_early_data ? 1 : 0;
+			return 0;
+		}
 		}
 		break;
 
@@ -1708,7 +2156,7 @@ static int quic_stream_close_vmeth(void *obj)
 	 *   - Stream was reset (RESET_STREAM already sent/received)
 	 *   - FIN was already sent (DATA_SENT or DATA_RECVD)
 	 */
-	if (stream->ep != NULL) {
+	if (stream->ep != NULL && stream->ep->crypto.application.initialized) {
 		state = quic_stream_get_state(stream);
 
 		if (state != STATE_RESET_SENT &&
@@ -1940,6 +2388,14 @@ int quic_connection_close(int sock)
 		return -EINVAL;
 	}
 
+	/*
+	 * Release any peer-initiated streams that were received but never
+	 * accepted via zsock_accept(). Each holds a context reference; without
+	 * this the context refcount stays elevated and quic_context_unref()
+	 * below never reaches zero, leaving the context pool slot occupied.
+	 */
+	quic_ctx_drain_incoming_streams(ctx);
+
 	(void)sock_obj_core_dealloc(ctx->sock);
 	quic_context_unref(ctx);
 
@@ -2039,7 +2495,7 @@ have_endpoint:
 		}
 
 		/* Wait for handshake to complete if not already done */
-		if (!ep->handshake.completed) {
+		if (!ep->handshake.completed && !quic_early_data_is_armed(ep)) {
 			ret = k_sem_take(&ep->handshake.sem,
 					 K_MSEC(ep->handshake.timeout_ms));
 			if (ret != 0) {
@@ -2053,6 +2509,9 @@ have_endpoint:
 				quic_stats_update_stream_open_failed();
 				return -ECONNREFUSED;
 			}
+		} else if (!ep->handshake.completed) {
+			NET_DBG("[EP:%p/%d] Allowing client stream open with 0-RTT armed",
+				ep, quic_get_by_ep(ep));
 		}
 	}
 
@@ -2080,6 +2539,10 @@ have_endpoint:
 	stream->type = initiator | direction;
 	stream->priority = priority;
 	stream->id = quic_stream_id_get(stream);
+	stream->local_max_data = quic_stream_local_rx_limit(ep, stream->type);
+	stream->local_max_data_sent = stream->local_max_data;
+	stream->fc_bytes_received = 0;
+	stream->highest_offset_received = 0;
 
 	/* Initialize TX flow control from peer transport parameters */
 	if (ep->peer_params.parsed) {

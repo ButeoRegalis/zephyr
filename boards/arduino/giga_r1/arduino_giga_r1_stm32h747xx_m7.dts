@@ -30,6 +30,14 @@
 		zephyr,memory-attr = <DT_MEM_ARM(ATTR_MPU_RAM)>;
 	};
 
+	ext_memory: memory@90000000 {
+		compatible = "zephyr,memory-region";
+		reg = <0x90000000 DT_SIZE_M(16)>; /* max addressable area */
+		zephyr,memory-region = "EXTMEM";
+		/* The ATTR_MPU_EXTMEM attribute causing a MPU FAULT */
+		zephyr,memory-attr = <DT_MEM_ARM(ATTR_MPU_IO)>;
+	};
+
 	aliases {
 		led0 = &red_led;
 		led1 = &green_led;
@@ -58,6 +66,15 @@
 	div-r = <2>;
 	clocks = <&clk_hse>;
 	status = "okay";
+};
+
+&pll2 {
+	clocks = <&clk_hse>;
+	div-m = <4>;
+	mul-n = <50>;
+	div-p = <50>;
+	div-q = <2>;
+	div-r = <2>;
 };
 
 &rcc {
@@ -108,10 +125,24 @@
 	};
 };
 
+&pdm0 {
+	pinctrl-0 = <&dfsdm1_ckout_pd3
+		     &dfsdm1_datin0_pc1>;
+	pinctrl-names = "default";
+	dmas = <&dmamux1 0 101 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+	dma-names = "rx";
+
+	dfsdm_channel_0: channel@0 {
+		reg = <0>;
+	};
+};
+
 &i2c4 {
 	status = "okay";
 	pinctrl-0 = <&i2c4_scl_pb6 &i2c4_sda_ph12>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 6 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpioh 12 GPIO_ACTIVE_HIGH>;
 	clock-frequency = <I2C_BITRATE_STANDARD>;
 };
 
@@ -119,6 +150,8 @@
 	status = "disabled";
 	pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 8 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 9 GPIO_ACTIVE_HIGH>;
 	clock-frequency = <I2C_BITRATE_FAST>;
 };
 
@@ -126,6 +159,8 @@
 	status = "disabled";
 	pinctrl-0 = <&i2c2_scl_ph4 &i2c2_sda_pb11>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpioh 4 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 11 GPIO_ACTIVE_HIGH>;
 	clock-frequency = <I2C_BITRATE_FAST>;
 };
 
@@ -146,17 +181,19 @@
 
 &flash0 {
 	partitions {
-		compatible = "fixed-partitions";
 		#address-cells = <1>;
 		#size-cells = <1>;
+		ranges;
 
 		boot_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
 			label = "bootloader";
 			reg = <0x0 0x40000>;
 			read-only;
 		};
 
 		slot0_partition: partition@40000 {
+			compatible = "zephyr,mapped-partition";
 			label = "image-0";
 			reg = <0x40000 0x000c0000>;
 		};

@@ -16,6 +16,8 @@
 /**
  * @brief Interfaces for battery chargers.
  * @defgroup charger_interface Battery Charger
+ * @since 3.5
+ * @version 1.0.0
  * @ingroup io_interfaces
  * @{
  *
@@ -118,7 +120,6 @@ enum charger_property {
 };
 
 /**
- * @typedef charger_prop_t
  * @brief A charger property's identifier
  *
  * See charger_property for a list of identifiers
@@ -126,7 +127,6 @@ enum charger_property {
 typedef uint16_t charger_prop_t;
 
 /**
- * @typedef charger_custom_value_int_t
  * @brief Type for custom signed integer property values.
  *
  * Used only by downstream custom properties (>= CHARGER_PROP_CUSTOM_BEGIN).
@@ -134,7 +134,6 @@ typedef uint16_t charger_prop_t;
 typedef int32_t charger_custom_value_int_t;
 
 /**
- * @typedef charger_custom_value_uint_t
  * @brief Type for custom unsigned integer property values.
  *
  * Used only by downstream custom properties (>= CHARGER_PROP_CUSTOM_BEGIN).
@@ -142,7 +141,6 @@ typedef int32_t charger_custom_value_int_t;
 typedef uint32_t charger_custom_value_uint_t;
 
 /**
- * @typedef charger_custom_value_bool_t
  * @brief Type for custom boolean property values.
  *
  * Used only by downstream custom properties (>= CHARGER_PROP_CUSTOM_BEGIN),

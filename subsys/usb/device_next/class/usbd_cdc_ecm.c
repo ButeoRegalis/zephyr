@@ -82,8 +82,8 @@ struct cdc_ecm_eth_data {
 	struct usbd_class_data *c_data;
 	struct usbd_desc_node *const mac_desc_data;
 	struct usbd_cdc_ecm_desc *const desc;
-	const struct usb_desc_header **const fs_desc;
-	const struct usb_desc_header **const hs_desc;
+	const struct usb_desc_header *const *const fs_desc;
+	const struct usb_desc_header *const *const hs_desc;
 
 	struct net_if *iface;
 	uint8_t mac_addr[6];
@@ -427,6 +427,12 @@ static int usbd_cdc_ecm_ctd(struct usbd_class_data *const c_data,
 			    const struct usb_setup_packet *const setup,
 			    const struct net_buf *const buf)
 {
+	if (setup->wLength) {
+		LOG_DBG("bmRequestType 0x%02x bRequest 0x%02x wLength %u unsupported",
+			setup->bmRequestType, setup->bRequest, setup->wLength);
+		return -ENOTSUP;
+	}
+
 	if (setup->RequestType.recipient == USB_REQTYPE_RECIPIENT_INTERFACE &&
 	    setup->bRequest == SET_ETHERNET_PACKET_FILTER) {
 		LOG_INF("bRequest 0x%02x (SetPacketFilter) not implemented",
@@ -437,9 +443,7 @@ static int usbd_cdc_ecm_ctd(struct usbd_class_data *const c_data,
 
 	LOG_DBG("bmRequestType 0x%02x bRequest 0x%02x unsupported",
 		setup->bmRequestType, setup->bRequest);
-	errno = -ENOTSUP;
-
-	return 0;
+	return -ENOTSUP;
 }
 
 static int usbd_cdc_ecm_init(struct usbd_class_data *const c_data)
@@ -476,8 +480,8 @@ static void usbd_cdc_ecm_shutdown(struct usbd_class_data *const c_data)
 	sys_dlist_remove(&data->mac_desc_data->node);
 }
 
-static void *usbd_cdc_ecm_get_desc(struct usbd_class_data *const c_data,
-				   const enum usbd_speed speed)
+static const void *usbd_cdc_ecm_get_desc(struct usbd_class_data *const c_data,
+					 const enum usbd_speed speed)
 {
 	const struct device *dev = usbd_class_get_private(c_data);
 	struct cdc_ecm_eth_data *const data = dev->data;
@@ -543,6 +547,7 @@ static int cdc_ecm_send(const struct device *dev, struct net_pkt *const pkt)
 }
 
 static int cdc_ecm_set_config(const struct device *dev,
+			      struct net_if *iface __unused,
 			      const enum ethernet_config_type type,
 			      const struct ethernet_config *config)
 {
@@ -561,23 +566,22 @@ static int cdc_ecm_set_config(const struct device *dev,
 	}
 }
 
-static enum ethernet_hw_caps cdc_ecm_get_capabilities(const struct device *dev)
+static enum ethernet_hw_caps cdc_ecm_get_capabilities(const struct device *dev __unused,
+						      struct net_if *iface __unused)
 {
-	ARG_UNUSED(dev);
-
 	return ETHERNET_LINK_10BASE | ETHERNET_PROMISC_MODE;
 }
 
-static int cdc_ecm_iface_start(const struct device *dev)
+static int cdc_ecm_iface_start(const struct device *dev, struct net_if *iface)
 {
 	struct cdc_ecm_eth_data *data = dev->data;
 
-	LOG_DBG("Start interface %p", data->iface);
+	LOG_DBG("Start interface %p", iface);
 
 	atomic_set_bit(&data->state, CDC_ECM_IFACE_UP);
 
 	if (atomic_test_bit(&data->state, CDC_ECM_DATA_IFACE_ENABLED)) {
-		net_if_carrier_on(data->iface);
+		net_if_carrier_on(iface);
 		if (cdc_ecm_send_notification(dev, true)) {
 			LOG_ERR("Failed to send connected notification");
 		}
@@ -586,11 +590,11 @@ static int cdc_ecm_iface_start(const struct device *dev)
 	return 0;
 }
 
-static int cdc_ecm_iface_stop(const struct device *dev)
+static int cdc_ecm_iface_stop(const struct device *dev, struct net_if *iface)
 {
 	struct cdc_ecm_eth_data *data = dev->data;
 
-	LOG_DBG("Stop interface %p", data->iface);
+	LOG_DBG("Stop interface %p", iface);
 
 	atomic_clear_bit(&data->state, CDC_ECM_IFACE_UP);
 
@@ -632,7 +636,7 @@ static int usbd_cdc_ecm_preinit(const struct device *dev)
 	return 0;
 }
 
-static struct usbd_class_api usbd_cdc_ecm_api = {
+static const struct usbd_class_api usbd_cdc_ecm_api = {
 	.request = usbd_cdc_ecm_request,
 	.update = usbd_cdc_ecm_update,
 	.enable = usbd_cdc_ecm_enable,
@@ -789,7 +793,7 @@ static struct usbd_cdc_ecm_desc cdc_ecm_desc_##n = {				\
 	},									\
 };										\
 										\
-	const static struct usb_desc_header *cdc_ecm_fs_desc_##n[] = {		\
+	const static struct usb_desc_header *const cdc_ecm_fs_desc_##n[] = {	\
 		(struct usb_desc_header *) &cdc_ecm_desc_##n.iad,		\
 		(struct usb_desc_header *) &cdc_ecm_desc_##n.if0,		\
 		(struct usb_desc_header *) &cdc_ecm_desc_##n.if0_header,	\
@@ -803,7 +807,7 @@ static struct usbd_cdc_ecm_desc cdc_ecm_desc_##n = {				\
 		(struct usb_desc_header *) &cdc_ecm_desc_##n.nil_desc,		\
 	};									\
 										\
-	const static struct usb_desc_header *cdc_ecm_hs_desc_##n[] = {		\
+	const static struct usb_desc_header *const cdc_ecm_hs_desc_##n[] = {	\
 		(struct usb_desc_header *) &cdc_ecm_desc_##n.iad,		\
 		(struct usb_desc_header *) &cdc_ecm_desc_##n.if0,		\
 		(struct usb_desc_header *) &cdc_ecm_desc_##n.if0_header,	\

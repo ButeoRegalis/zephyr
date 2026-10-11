@@ -1500,6 +1500,88 @@ static void cdns_i3c_start_transfer(const struct device *dev)
 	sys_write32(CTRL_MCS | sys_read32(config->base + CTRL), config->base + CTRL);
 }
 
+static k_timeout_t cdns_i3c_calc_timeout_i3c(const struct i3c_msg *msgs, uint8_t num_msgs,
+					      uint32_t scl_hz)
+{
+	uint64_t us = 0;
+	bool send_broadcast = true;
+
+	for (uint8_t i = 0; i < num_msgs; i++) {
+		uint32_t bits;
+
+		if ((msgs[i].flags & I3C_MSG_HDR) && (msgs[i].hdr_mode & I3C_MSG_HDR_DDR)) {
+			/*
+			 * HDR-DDR preamble: ENTHDR0 broadcast CCC (0x7E addr + cmd code) = 18
+			 * SDR bits. DDR payload: (len/2) 16-bit data words + 1 DDR command header
+			 * word + 1 DDR CRC word = (len/2 + 2) words total, each taking 8 SCL
+			 * cycles (DDR encodes 2 bits per SCL edge, so 16 bits = 8 cycles).
+			 */
+			bits = 18 + ((msgs[i].len / 2) + 2) * 8;
+		} else {
+			/* SDR: address frame (9 bits) + data bytes (9 bits each) */
+			bits = 9 + (msgs[i].len * 9);
+			if (!(msgs[i].flags & I3C_MSG_NBCH) && send_broadcast) {
+				bits += 9; /* broadcast header 0x7E */
+				send_broadcast = false;
+			}
+			if (((i + 1) == num_msgs) || (msgs[i].flags & I3C_MSG_STOP)) {
+				send_broadcast = true;
+			}
+		}
+
+		us += DIV_ROUND_UP((uint64_t)bits * USEC_PER_SEC, scl_hz);
+	}
+
+	us += CONFIG_I3C_CADENCE_TRANSFER_TIMEOUT_MARGIN_US;
+
+	return K_TICKS(k_us_to_ticks_ceil64(us));
+}
+
+static k_timeout_t cdns_i3c_calc_timeout_i2c(const struct i2c_msg *msgs, uint8_t num_msgs,
+					      uint32_t scl_hz)
+{
+	uint64_t us = 0;
+
+	for (uint8_t i = 0; i < num_msgs; i++) {
+		uint32_t bits = (msgs[i].flags & I2C_MSG_ADDR_10_BITS) ? 18 : 9;
+
+		bits += msgs[i].len * 9;
+		us += DIV_ROUND_UP((uint64_t)bits * USEC_PER_SEC, scl_hz);
+	}
+
+	us += CONFIG_I3C_CADENCE_TRANSFER_TIMEOUT_MARGIN_US;
+
+	return K_TICKS(k_us_to_ticks_ceil64(us));
+}
+
+static k_timeout_t cdns_i3c_calc_timeout_ccc(const struct i3c_ccc_payload *payload,
+					      uint32_t scl_hz)
+{
+	/*
+	 * CCC frame on the wire: broadcast addr (9) + CCC command byte (9) + optional
+	 * defining/broadcast data byte(s) (9 each). Per the I3C spec these are
+	 * transmitted once per CCC frame regardless of the number of addressed targets.
+	 *
+	 * For a direct CCC the controller then issues, per target, a repeated start +
+	 * target address (9) + per-target data bytes (9 each). The Cadence IP requires
+	 * one queued command per target so it knows the direction and length, but it
+	 * still emits a single CCC byte / defining byte at the head of the wire frame.
+	 */
+	uint64_t us;
+	uint32_t bits = 18 + (payload->ccc.data_len * 9);
+
+	if (!i3c_ccc_is_payload_broadcast(payload)) {
+		for (size_t i = 0; i < payload->targets.num_targets; i++) {
+			bits += 9 + (payload->targets.payloads[i].data_len * 9);
+		}
+	}
+
+	us = DIV_ROUND_UP((uint64_t)bits * USEC_PER_SEC, scl_hz);
+	us += CONFIG_I3C_CADENCE_TRANSFER_TIMEOUT_MARGIN_US;
+
+	return K_TICKS(k_us_to_ticks_ceil64(us));
+}
+
 static int cdns_i3c_do_ccc_do(const struct device *dev, struct i3c_ccc_payload *payload, bool async,
 			      i3c_callback_t cb, void *userdata)
 {
@@ -1649,16 +1731,19 @@ static int cdns_i3c_do_ccc_do(const struct device *dev, struct i3c_ccc_payload *
 	data->xfer.ret = -ETIMEDOUT;
 	data->xfer.num_cmds = num_cmds;
 
+	k_timeout_t xfer_timeout = cdns_i3c_calc_timeout_ccc(payload,
+							      data->common.ctrl_config.scl.i3c);
+
 	cdns_i3c_start_transfer(dev);
 	if (!async) {
-		if (k_sem_take(&data->xfer.complete, K_MSEC(1000)) != 0) {
+		if (k_sem_take(&data->xfer.complete, xfer_timeout) != 0) {
 			LOG_ERR("%s: transfer timed out", dev->name);
 			cdns_i3c_cancel_transfer(dev);
 		}
 	}
 #ifdef CONFIG_I3C_CALLBACK
 	else {
-		k_timer_start(&data->timeout, K_MSEC(1000), K_NO_WAIT);
+		k_timer_start(&data->timeout, xfer_timeout, K_NO_WAIT);
 	}
 #endif
 
@@ -1693,6 +1778,36 @@ error:
 }
 
 /**
+ * @brief Reset the driver-owned transfer status fields of a CCC payload
+ *
+ * @c num_xfer and @c err are outputs the controller driver is required to write
+ * (see @ref i3c_ccc_payload). This driver only writes them from the CMDR
+ * completion handler, which runs once per command response actually retired by
+ * the IP. A command that is dropped without producing a CMDR entry therefore
+ * never updates them, while the transaction as a whole can still complete
+ * successfully -- leaving whatever the caller happened to have in the payload.
+ *
+ * The CCC helpers in i3c_ccc.c declare their payloads as uninitialized stack
+ * locals and read @c num_xfer back as length, so that residue gets consumed
+ * as byte count. Clear the fields up front so an incomplete CCC reports zero
+ * bytes transferred rather than stack garbage.
+ *
+ * @see cdns_i3c_msgs_reset_status for the same treatment of private transfers.
+ *
+ * @param payload Pointer to CCC payload.
+ */
+static void cdns_i3c_ccc_reset_status(struct i3c_ccc_payload *payload)
+{
+	payload->ccc.num_xfer = 0U;
+	payload->ccc.err = I3C_ERROR_CE_NONE;
+
+	for (size_t i = 0; i < payload->targets.num_targets; i++) {
+		payload->targets.payloads[i].num_xfer = 0U;
+		payload->targets.payloads[i].err = I3C_ERROR_CE_NONE;
+	}
+}
+
+/**
  * @brief Send Common Command Code (CCC).
  *
  * @see i3c_do_ccc
@@ -1704,6 +1819,7 @@ error:
  */
 static int cdns_i3c_do_ccc(const struct device *dev, struct i3c_ccc_payload *payload)
 {
+	cdns_i3c_ccc_reset_status(payload);
 	return cdns_i3c_do_ccc_do(dev, payload, false, NULL, NULL);
 }
 
@@ -1723,9 +1839,57 @@ static int cdns_i3c_do_ccc(const struct device *dev, struct i3c_ccc_payload *pay
 static int cdns_i3c_do_ccc_cb(const struct device *dev, struct i3c_ccc_payload *payload,
 			      i3c_callback_t cb, void *userdata)
 {
+	cdns_i3c_ccc_reset_status(payload);
 	return cdns_i3c_do_ccc_do(dev, payload, true, cb, userdata);
 }
 #endif
+
+static void cdns_i3c_daa_attach_known_target(const struct device *dev,
+					     struct i3c_device_desc *target,
+					     uint8_t rr_idx, uint8_t dyn_addr,
+					     uint8_t bcr, uint8_t dcr, uint64_t pid)
+{
+	struct cdns_i3c_data *data = dev->data;
+
+	/* If RSTDAA detached this desc, the slist no longer carries it.
+	 * Re-attach so the caller's desc continues to track this device
+	 * on the bus.
+	 */
+	target->dynamic_addr = dyn_addr;
+	target->bcr = bcr;
+	target->dcr = dcr;
+
+	int aret = i3c_attach_i3c_device(target);
+
+	if (aret != 0 && aret != -EALREADY) {
+		LOG_ERR("%s: attach for PID 0x%012llx failed: %d",
+			dev->name, pid, aret);
+	}
+
+	data->cdns_i3c_i2c_priv_data[rr_idx].id = rr_idx;
+	target->controller_priv = &(data->cdns_i3c_i2c_priv_data[rr_idx]);
+
+	LOG_DBG("%s: PID 0x%012llx assigned dynamic address 0x%02x",
+		dev->name, pid, dyn_addr);
+
+	/* The Cadence I3C IP does not allow the controller to assign a
+	 * specific DA during ENTDAA -- it picks the next address from the
+	 * pre-programmed RR slots. If the DT requested a particular
+	 * init_dynamic_addr and the hardware assigned a different one,
+	 * issue SETNEWDA to move the target to the preferred address.
+	 * This may fail if the preferred address is already in use, in
+	 * which case the target keeps the ENTDAA-assigned DA.
+	 */
+	if (target->init_dynamic_addr != 0 &&
+	    target->init_dynamic_addr != dyn_addr) {
+		int sret = i3c_bus_setnewda(target, target->init_dynamic_addr);
+
+		if (sret != 0) {
+			LOG_WRN("%s: SETNEWDA to 0x%02x failed (%d), keeping DA 0x%02x",
+				dev->name, target->init_dynamic_addr, sret, dyn_addr);
+		}
+	}
+}
 
 /**
  * @brief Perform Dynamic Address Assignment.
@@ -1827,19 +1991,12 @@ static int cdns_i3c_do_daa(const struct device *dev)
 						"list, given DA 0x%02x",
 						dev->name, pid, dyn_addr);
 				} else {
-					target->dynamic_addr = dyn_addr;
-					target->bcr = bcr;
-					target->dcr = dcr;
-
-					data->cdns_i3c_i2c_priv_data[rr_idx].id = rr_idx;
-					target->controller_priv =
-						&(data->cdns_i3c_i2c_priv_data[rr_idx]);
-
-					LOG_DBG("%s: PID 0x%012llx assigned dynamic address 0x%02x",
-						dev->name, pid, dyn_addr);
+					cdns_i3c_daa_attach_known_target(dev,
+						target, rr_idx, dyn_addr,
+						bcr, dcr, pid);
 				}
 				i3c_addr_slots_mark_i3c(&data->common.attached_dev.addr_slots,
-							dyn_addr);
+							target ? target->dynamic_addr : dyn_addr);
 			}
 		}
 	} else {
@@ -2175,6 +2332,7 @@ static int cdns_i3c_i2c_transfer_do(const struct device *dev, struct i3c_i2c_dev
 	uint32_t txsize = 0;
 	uint32_t rxsize = 0;
 	int ret;
+	k_timeout_t xfer_timeout;
 
 	__ASSERT_NO_MSG(num_msgs > 0);
 
@@ -2256,16 +2414,19 @@ static int cdns_i3c_i2c_transfer_do(const struct device *dev, struct i3c_i2c_dev
 	data->xfer.ret = -ETIMEDOUT;
 	data->xfer.num_cmds = num_msgs;
 
+	xfer_timeout = cdns_i3c_calc_timeout_i2c(msgs, num_msgs,
+						  data->common.ctrl_config.scl.i2c);
+
 	cdns_i3c_start_transfer(dev);
 	if (!async) {
-		if (k_sem_take(&data->xfer.complete, K_MSEC(1000)) != 0) {
+		if (k_sem_take(&data->xfer.complete, xfer_timeout) != 0) {
 			cdns_i3c_cancel_transfer(dev);
 		}
 		ret = data->xfer.ret;
 	}
 #ifdef CONFIG_I2C_CALLBACK
 	else {
-		k_timer_start(&data->timeout, K_MSEC(1000), K_NO_WAIT);
+		k_timer_start(&data->timeout, xfer_timeout, K_NO_WAIT);
 		ret = 0;
 	}
 #endif
@@ -2354,6 +2515,16 @@ static int cdns_i3c_master_get_rr_slot(const struct device *dev, uint8_t dyn_add
 				return rr_idx;
 			}
 		}
+	}
+
+	/* No active RR slot carries this dyn_addr -- the address is stale
+	 * (e.g. the desc was detached without RSTDAA, or DAA hasn't run
+	 * yet on this address). Fall back to allocating a fresh slot if
+	 * one is available; the caller will reprogram the DA via the
+	 * normal DAA / SETDASA / SETNEWDA flow before the next transfer.
+	 */
+	if (data->free_rr_slots) {
+		return find_lsb_set(data->free_rr_slots) - 1;
 	}
 
 	return -EINVAL;
@@ -2449,8 +2620,8 @@ static int cdns_i3c_detach_device(const struct device *dev, struct i3c_device_de
 	struct cdns_i3c_i2c_dev_data *cdns_i3c_device_data = desc->controller_priv;
 
 	if (cdns_i3c_device_data == NULL) {
-		LOG_ERR("%s: %s: device not attached", dev->name, desc->dev->name);
-		return -EINVAL;
+		/* device was probably attached, but never went through ENTDAA */
+		return 0;
 	}
 
 	k_mutex_lock(&data->bus_lock, K_FOREVER);
@@ -2538,6 +2709,7 @@ static int cdns_i3c_transfer_do(const struct device *dev, struct i3c_device_desc
 	int txsize = 0;
 	int rxsize = 0;
 	int ret;
+	k_timeout_t xfer_timeout;
 
 	__ASSERT_NO_MSG(num_msgs > 0);
 
@@ -2707,16 +2879,19 @@ static int cdns_i3c_transfer_do(const struct device *dev, struct i3c_device_desc
 	data->xfer.ret = -ETIMEDOUT;
 	data->xfer.num_cmds = num_msgs;
 
+	xfer_timeout = cdns_i3c_calc_timeout_i3c(msgs, num_msgs,
+						  data->common.ctrl_config.scl.i3c);
+
 	cdns_i3c_start_transfer(dev);
 	if (!async) {
-		if (k_sem_take(&data->xfer.complete, K_MSEC(1000)) != 0) {
+		if (k_sem_take(&data->xfer.complete, xfer_timeout) != 0) {
 			LOG_ERR("%s: transfer timed out", dev->name);
 			cdns_i3c_cancel_transfer(dev);
 		}
 	}
 #ifdef CONFIG_I3C_CALLBACK
 	else {
-		k_timer_start(&data->timeout, K_MSEC(1000), K_NO_WAIT);
+		k_timer_start(&data->timeout, xfer_timeout, K_NO_WAIT);
 	}
 #endif
 	if (!async) {
@@ -2739,6 +2914,31 @@ error:
 }
 
 /**
+ * @brief Reset the driver-owned transfer status fields of private messages.
+ *
+ * @c num_xfer and @c err carry the same driver-writes-this contract as their
+ * CCC counterparts (see @ref i3c_msg) and are populated from the same CMDR
+ * completion handler, so a message whose command never retires a CMDR entry
+ * leaves both holding the caller's prior contents. Callers that size a
+ * subsequent access on @c num_xfer -- the documented way to learn how many
+ * bytes a target actually returned before EoD -- would then act on that
+ * residue. Clear the fields up front so an incomplete message reports zero
+ * bytes transferred rather than stale data.
+ *
+ * @see cdns_i3c_ccc_reset_status for the CCC payload equivalent.
+ *
+ * @param msgs Pointer to I3C messages.
+ * @param num_msgs Number of messages.
+ */
+static void cdns_i3c_msgs_reset_status(struct i3c_msg *msgs, uint8_t num_msgs)
+{
+	for (uint8_t i = 0; i < num_msgs; i++) {
+		msgs[i].num_xfer = 0U;
+		msgs[i].err = I3C_ERROR_CE_NONE;
+	}
+}
+
+/**
  * @brief Transfer messages in I3C mode.
  *
  * @see i3c_transfer
@@ -2753,6 +2953,7 @@ error:
 static int cdns_i3c_transfer(const struct device *dev, struct i3c_device_desc *target,
 			     struct i3c_msg *msgs, uint8_t num_msgs)
 {
+	cdns_i3c_msgs_reset_status(msgs, num_msgs);
 	return cdns_i3c_transfer_do(dev, target, msgs, num_msgs, false, NULL, NULL);
 }
 
@@ -2775,6 +2976,7 @@ static int cdns_i3c_transfer_cb(const struct device *dev, struct i3c_device_desc
 				struct i3c_msg *msgs, uint8_t num_msgs, i3c_callback_t cb,
 				void *userdata)
 {
+	cdns_i3c_msgs_reset_status(msgs, num_msgs);
 	return cdns_i3c_transfer_do(dev, target, msgs, num_msgs, true, cb, userdata);
 }
 #endif

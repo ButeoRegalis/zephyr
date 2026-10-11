@@ -132,14 +132,47 @@
 	status = "okay";
 };
 
+&tstmr1 {
+	status = "okay";
+};
+
+&tstmr2 {
+	status = "okay";
+};
+
 &flexcan1 {
 	status = "okay";
 	pinctrl-0 = <&pinmux_flexcan1>;
 	pinctrl-names = "default";
 };
 
+&i3c2 {
+	pinctrl-0 = <&pinmux_i3c2>;
+	pinctrl-names = "default";
+};
+
+/*
+ * I3C2 shares GPIO_AD_18/19 with LPI2C3 (board EEPROM). lpi2c3 is enabled by
+ * default; overlays that need i3c2 must disable lpi2c3 and eeprom0.
+ */
+p3t1755dp_ard_i3c_interface: &i3c2 {};
+
+p3t1755dp_ard_i2c_interface: &lpi2c3 {};
+
 &systick {
 	status = "okay";
+};
+
+&flexspi {
+	/*
+	 * FlexSPI1 is configured by the Boot ROM for HyperRAM (via XMCD).
+	 * Reinitializing the controller overwrites the Boot ROM configuration
+	 * and makes HyperRAM inaccessible. Enable this node via an overlay only
+	 * when the application explicitly manages FlexSPI1 initialization, or
+	 * when CM7 executes XIP from HyperRAM (the XIP guard preserves the
+	 * Boot ROM configuration in that case).
+	 */
+	status = "disabled";
 };
 
 &flexspi2 {
@@ -176,31 +209,39 @@
 			erase-block-size = <DT_SIZE_K(4)>;
 			write-block-size = <1>;
 
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges;
+
 			partitions {
-				compatible = "fixed-partitions";
 				#address-cells = <1>;
 				#size-cells = <1>;
+				ranges;
 
 				/*
 				 * Partition sizes must be aligned
 				 * to the flash memory sector size of 4KB.
 				 */
 				boot_partition: partition@0 {
+					compatible = "zephyr,mapped-partition";
 					label = "mcuboot";
 					reg = <0x00000000 DT_SIZE_K(128)>;
 				};
 
 				slot0_partition: partition@20000 {
+					compatible = "zephyr,mapped-partition";
 					label = "image-0";
 					reg = <0x00020000 DT_SIZE_M(7)>;
 				};
 
 				slot1_partition: partition@720000 {
+					compatible = "zephyr,mapped-partition";
 					label = "image-1";
 					reg = <0x00720000 DT_SIZE_M(7)>;
 				};
 
 				storage_partition: partition@e20000 {
+					compatible = "zephyr,mapped-partition";
 					label = "storage";
 					reg = <0x00e20000 (DT_SIZE_M(2) - DT_SIZE_K(128))>;
 				};
@@ -238,7 +279,7 @@
 
 /* Internal port */
 &enetc_psi1 {
-	local-mac-address = [00 00 00 01 03 00];
+	zephyr,random-mac-address;
 	status = "okay";
 };
 
@@ -251,7 +292,7 @@
 };
 
 &switch_port0 {
-	local-mac-address = [00 00 00 01 05 00];
+	zephyr,random-mac-address;
 	pinctrl-0 = <&eth0_default>;
 	pinctrl-names = "default";
 	phy-handle = <&phy0>;
@@ -260,7 +301,7 @@
 };
 
 &switch_port2 {
-	local-mac-address = [00 00 00 01 07 00];
+	zephyr,random-mac-address;
 	pinctrl-0 = <&eth2_default>;
 	pinctrl-names = "default";
 	phy-handle = <&phy2>;
@@ -270,7 +311,11 @@
 
 /* Internal port connecting switch to CPU */
 &switch_port4 {
-	local-mac-address = [00 00 00 01 08 00];
+	zephyr,random-mac-address;
+	status = "okay";
+};
+
+&dac {
 	status = "okay";
 };
 
@@ -282,4 +327,8 @@
 	status = "okay";
 	pinctrl-0 = <&pinmux_flexpwm3>;
 	pinctrl-names = "default";
+};
+
+&sys_ctr {
+	status = "okay";
 };

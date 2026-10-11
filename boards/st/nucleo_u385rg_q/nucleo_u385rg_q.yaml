@@ -11,10 +11,12 @@ supported:
   - arduino_spi
   - can
   - crc
+  - crypto
   - dac
   - dma
   - gpio
   - i2c
+  - i3c
   - spi
   - uart
   - usart

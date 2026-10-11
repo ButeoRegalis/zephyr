@@ -8,6 +8,7 @@
 #include <zephyr/kernel.h>
 #include <kernel_internal.h>
 #include <zephyr/arch/riscv/csr.h>
+#include <zephyr/llext/symbol.h>
 #include <pmp.h>
 
 #ifdef CONFIG_USERSPACE
@@ -15,6 +16,17 @@
  * Per-thread (TLS) variable indicating whether execution is in user mode.
  */
 Z_THREAD_LOCAL uint8_t is_user_mode;
+
+/*
+ * Exported accessor for the user-mode flag so loadable extensions (llext) -
+ * which cannot relocate a thread-local symbol - can resolve it and thus call
+ * syscalls. Mirrors the Arm z_arm_thread_is_in_user_mode().
+ */
+bool z_riscv_thread_is_user_mode(void)
+{
+	return is_user_mode != 0;
+}
+EXPORT_SYMBOL(z_riscv_thread_is_user_mode);
 #endif
 
 void arch_new_thread(struct k_thread *thread, k_thread_stack_t *stack,
@@ -50,7 +62,7 @@ void arch_new_thread(struct k_thread *thread, k_thread_stack_t *stack,
 	 *
 	 * Given that thread startup happens through the exception exit
 	 * path, initially set:
-	 * 1) MSTATUS to MSTATUS_DEF_RESTORE in the thread stack to enable
+	 * 1) MSTATUS to RV_STATUS_DEF_RESTORE in the thread stack to enable
 	 *    interrupts when the newly created thread will be scheduled;
 	 * 2) MEPC to the address of the z_thread_entry in the thread
 	 *    stack.
@@ -62,7 +74,7 @@ void arch_new_thread(struct k_thread *thread, k_thread_stack_t *stack,
 	 *    counter will be restored following the MEPC value set within the
 	 *    thread stack.
 	 */
-	stack_init->mstatus = MSTATUS_DEF_RESTORE;
+	stack_init->mstatus = RV_STATUS_DEF_RESTORE;
 
 #if defined(CONFIG_FPU_SHARING)
 	/* thread birth happens through the exception return path */
@@ -163,17 +175,27 @@ FUNC_NORETURN void arch_user_mode_enter(k_thread_entry_t user_entry,
 				_current->stack_info.size -
 				_current->stack_info.delta);
 
+#ifdef CONFIG_RISCV_S_MODE
+	status = csr_read(sstatus);
+	/* Clear SPP so that sret returns to U-mode */
+	status = INSERT_FIELD(status, SSTATUS_SPP, 0);
+	/* Enable IRQs when entering user mode (SPIE) */
+	status = INSERT_FIELD(status, SSTATUS_SPIE, 1);
+	/* Disable IRQs in S-mode until the mode switch */
+	status = INSERT_FIELD(status, SSTATUS_SIE, 0);
+	csr_write(sstatus, status);
+	csr_write(sepc, z_thread_entry);
+#else
 	status = csr_read(mstatus);
-
 	/* Set next CPU status to user mode */
 	status = INSERT_FIELD(status, MSTATUS_MPP, PRV_U);
 	/* Enable IRQs for user mode */
 	status = INSERT_FIELD(status, MSTATUS_MPIE, 1);
 	/* Disable IRQs for m-mode until the mode switch */
 	status = INSERT_FIELD(status, MSTATUS_MIE, 0);
-
 	csr_write(mstatus, status);
 	csr_write(mepc, z_thread_entry);
+#endif
 
 #ifdef CONFIG_PMP_KERNEL_MODE_DYNAMIC
 	/* reconfigure as the kernel mode configuration will be different */
@@ -199,11 +221,19 @@ FUNC_NORETURN void arch_user_mode_enter(k_thread_entry_t user_entry,
 	register void *a2 __asm__("a2") = p2;
 	register void *a3 __asm__("a3") = p3;
 
+#ifdef CONFIG_RISCV_S_MODE
+	__asm__ volatile (
+	"mv sp, %4; sret"
+	:
+	: "r" (a0), "r" (a1), "r" (a2), "r" (a3), "r" (top_of_user_stack)
+	: "memory");
+#else
 	__asm__ volatile (
 	"mv sp, %4; mret"
 	:
 	: "r" (a0), "r" (a1), "r" (a2), "r" (a3), "r" (top_of_user_stack)
 	: "memory");
+#endif
 
 	CODE_UNREACHABLE;
 }
@@ -255,28 +285,45 @@ FUNC_NORETURN void z_riscv_switch_to_main_no_multithreading(k_thread_entry_t mai
 #ifdef CONFIG_CUSTOM_STACK_GUARD
 	z_riscv_custom_stack_guard_disable();
 
-	irq_unlock(MSTATUS_IEN);
+	/*
+	 * No thread object exists in no-multithreading mode, so pass NULL:
+	 * the callee's contract allows a NULL thread and expects the
+	 * implementation to guard the main stack in that case.
+	 */
+	register struct k_thread *a0 __asm__("a0") = NULL;
+
+	/*
+	 * Bind main_entry to a callee-saved register: the call below
+	 * clobbers the caller-saved registers, and jalr consumes %1 only
+	 * after the call returns. %0 is safe anywhere because mv sp
+	 * consumes it before the call. RV_STATUS_IE is passed with constraint
+	 * "K" (5-bit unsigned immediate) so the assembler emits csrsi without
+	 * allocating a caller-saved register that could be clobbered by the call.
+	 */
+	register k_thread_entry_t s1 __asm__("s1") = main_entry;
 
 	__asm__ volatile (
 	"mv sp, %0\n"
 	"call z_riscv_custom_stack_guard_enable\n"
+	"csrs " RV_STATUS_CSR ", %2\n"
 	"jalr ra, %1, 0\n"
 	:
-	: "r" (main_stack), "r" (main_entry)
+	: "r" (main_stack), "r" (s1), "K" (RV_STATUS_IE), "r" (a0)
 	: "memory");
 #else
-	irq_unlock(MSTATUS_IEN);
-
 	__asm__ volatile (
-	"mv sp, %0; jalr ra, %1, 0"
+	"mv sp, %0\n"
+	"csrs " RV_STATUS_CSR ", %2\n"
+	"jalr ra, %1, 0\n"
 	:
-	: "r" (main_stack), "r" (main_entry)
+	: "r" (main_stack), "r" (main_entry), "K" (RV_STATUS_IE)
 	: "memory");
 #endif /* CONFIG_CUSTOM_STACK_GUARD */
 
 	/* infinite loop */
 	irq_lock();
 	while (true) {
+		k_cpu_idle();
 	}
 
 	CODE_UNREACHABLE; /* LCOV_EXCL_LINE */

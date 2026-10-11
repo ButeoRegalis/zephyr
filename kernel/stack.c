@@ -10,18 +10,19 @@
 
 #include <zephyr/sys/math_extras.h>
 #include <zephyr/kernel.h>
-#include <zephyr/kernel_structs.h>
 
 #include <zephyr/toolchain.h>
 #include <ksched.h>
+#include <scheduler.h>
 #include <wait_q.h>
 #include <zephyr/sys/check.h>
 #include <zephyr/init.h>
 #include <zephyr/internal/syscall_handler.h>
 #include <kernel_internal.h>
+#include <stdbool.h>
 
 #ifdef CONFIG_OBJ_CORE_STACK
-static struct k_obj_type obj_type_stack;
+K_OBJ_TYPE_DEFINE(obj_type_stack, k_stack, K_OBJ_TYPE_STACK_ID, NULL);
 #endif /* CONFIG_OBJ_CORE_STACK */
 
 void k_stack_init(struct k_stack *stack, stack_data_t *buffer,
@@ -44,17 +45,23 @@ void k_stack_init(struct k_stack *stack, stack_data_t *buffer,
 int32_t z_impl_k_stack_alloc_init(struct k_stack *stack, uint32_t num_entries)
 {
 	void *buffer;
+	size_t total_size;
 	int32_t ret;
 
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_stack, alloc_init, stack);
 
-	buffer = z_thread_malloc(num_entries * sizeof(stack_data_t));
-	if (buffer != NULL) {
-		k_stack_init(stack, buffer, num_entries);
-		stack->flags = K_STACK_FLAG_ALLOC;
-		ret = 0;
-	} else {
+	/* Reject allocation sizes that cannot be represented. */
+	if (size_mul_overflow(num_entries, sizeof(stack_data_t), &total_size)) {
 		ret = -ENOMEM;
+	} else {
+		buffer = z_thread_malloc(total_size);
+		if (buffer != NULL) {
+			k_stack_init(stack, buffer, num_entries);
+			stack->flags = K_STACK_FLAG_ALLOC;
+			ret = 0;
+		} else {
+			ret = -ENOMEM;
+		}
 	}
 
 	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, alloc_init, stack, ret);
@@ -77,48 +84,51 @@ static inline int32_t z_vrfy_k_stack_alloc_init(struct k_stack *stack,
 #include <zephyr/syscalls/k_stack_alloc_init_mrsh.c>
 #endif /* CONFIG_USERSPACE */
 
-static int stack_cleanup(struct k_stack *stack, void **mem)
+int z_stack_cleanup(struct k_stack *stack, __maybe_unused bool locked)
 {
-	*mem = NULL;
-
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_stack, cleanup, stack);
 
-	CHECKIF(z_waitq_head(&stack->wait_q) != NULL) {
-		SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, cleanup, stack, -EAGAIN);
-		return -EAGAIN;
+	int ret = 0;
+	bool freed = false;
+	k_spinlock_key_t key = k_spin_lock(&stack->lock);
+
+	CHECKIF(locked && (z_waitq_head_locked(&stack->wait_q) != NULL)) {
+		ret = -EAGAIN;
+		goto out;
+	}
+
+	CHECKIF(!locked && (z_waitq_head(&stack->wait_q) != NULL)) {
+		ret = -EAGAIN;
+		goto out;
 	}
 
 	if ((stack->flags & K_STACK_FLAG_ALLOC) != (uint8_t)0) {
-		*mem = stack->base;
+		k_free(stack->base);
 		stack->base = NULL;
 		stack->flags &= ~K_STACK_FLAG_ALLOC;
+		freed = true;
 	}
 
-	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, cleanup, stack, 0);
-	return 0;
+out:
+	k_spin_unlock(&stack->lock, key);
+
+#ifdef CONFIG_OBJ_CORE_STACK
+	if (freed) {
+		k_obj_core_unlink(K_OBJ_CORE(stack));
+	}
+#endif /* CONFIG_OBJ_CORE_STACK */
+	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, cleanup, stack, ret);
+
+	return ret;
 }
 
 int k_stack_cleanup(struct k_stack *stack)
 {
-	void *mem;
-	int ret = stack_cleanup(stack, &mem);
-
-	k_free(mem);
-	return ret;
-}
-
-int z_stack_cleanup_sched_locked(struct k_stack *stack)
-{
-	void *mem;
-	int ret = stack_cleanup(stack, &mem);
-
-	k_free_sched_locked(mem);
-	return ret;
+	return z_stack_cleanup(stack, false);
 }
 
 int z_impl_k_stack_push(struct k_stack *stack, stack_data_t data)
 {
-	struct k_thread *first_pending_thread;
 	int ret = 0;
 	k_spinlock_key_t key = k_spin_lock(&stack->lock);
 
@@ -129,13 +139,7 @@ int z_impl_k_stack_push(struct k_stack *stack, stack_data_t data)
 		goto out;
 	}
 
-	first_pending_thread = z_unpend_first_thread(&stack->wait_q);
-
-	if (unlikely(first_pending_thread != NULL)) {
-		z_thread_return_value_set_with_data(first_pending_thread,
-						   0, (void *)data);
-
-		z_ready_thread(first_pending_thread);
+	if (z_sched_wake(&stack->wait_q, 0, (void *)data)) {
 		z_reschedule(&stack->lock, key);
 		goto end;
 	} else {
@@ -217,24 +221,3 @@ static inline int z_vrfy_k_stack_pop(struct k_stack *stack,
 }
 #include <zephyr/syscalls/k_stack_pop_mrsh.c>
 #endif /* CONFIG_USERSPACE */
-
-#ifdef CONFIG_OBJ_CORE_STACK
-static int init_stack_obj_core_list(void)
-{
-	/* Initialize stack object type */
-
-	z_obj_type_init(&obj_type_stack, K_OBJ_TYPE_STACK_ID,
-			offsetof(struct k_stack, obj_core));
-
-	/* Initialize and link statically defined stacks */
-
-	STRUCT_SECTION_FOREACH(k_stack, stack) {
-		k_obj_core_init_and_link(K_OBJ_CORE(stack), &obj_type_stack);
-	}
-
-	return 0;
-}
-
-SYS_INIT(init_stack_obj_core_list, PRE_KERNEL_1,
-	 CONFIG_KERNEL_INIT_PRIORITY_OBJECTS);
-#endif /* CONFIG_OBJ_CORE_STACK */
