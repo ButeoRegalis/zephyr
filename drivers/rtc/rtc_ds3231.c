@@ -276,9 +276,9 @@ static int rtc_ds3231_rtc_time_to_buf(const struct rtc_time *tm, uint8_t *buf)
 	buf[0] = bin2bcd(tm->tm_sec) & DS3231_BITS_TIME_SECONDS;
 	buf[1] = bin2bcd(tm->tm_min) & DS3231_BITS_TIME_MINUTES;
 	buf[2] = bin2bcd(tm->tm_hour) & DS3231_BITS_TIME_HOURS;
-	buf[3] = bin2bcd(tm->tm_wday) & DS3231_BITS_TIME_DAY_OF_WEEK;
+	buf[3] = bin2bcd(tm->tm_wday + 1) & DS3231_BITS_TIME_DAY_OF_WEEK;
 	buf[4] = bin2bcd(tm->tm_mday) & DS3231_BITS_TIME_DATE;
-	buf[5] = bin2bcd(tm->tm_mon) & DS3231_BITS_TIME_MONTH;
+	buf[5] = bin2bcd(tm->tm_mon + 1) & DS3231_BITS_TIME_MONTH;
 
 	/* here modulo 100 returns the last two digits of the year,
 	 * as the DS3231 chip can only store year data for 0-99,
@@ -336,9 +336,9 @@ static int rtc_ds3231_buf_to_rtc_time(const uint8_t *buf, struct rtc_time *timep
 		timeptr->tm_hour = bcd2bin(hour);
 	}
 
-	timeptr->tm_wday = bcd2bin(buf[3] & DS3231_BITS_TIME_DAY_OF_WEEK);
+	timeptr->tm_wday = bcd2bin(buf[3] & DS3231_BITS_TIME_DAY_OF_WEEK) - 1;
 	timeptr->tm_mday = bcd2bin(buf[4] & DS3231_BITS_TIME_DATE);
-	timeptr->tm_mon = bcd2bin(buf[5] & DS3231_BITS_TIME_MONTH);
+	timeptr->tm_mon = bcd2bin(buf[5] & DS3231_BITS_TIME_MONTH) - 1;
 	timeptr->tm_year = bcd2bin(buf[6] & DS3231_BITS_TIME_YEAR);
 
 	/* FIXME: we will always just set us to 20xx for year */
@@ -412,7 +412,7 @@ static int rtc_ds3231_rtc_time_to_alarm_buf(const struct rtc_time *tm, int id, c
 	}
 
 	if (mask & RTC_ALARM_TIME_MASK_WEEKDAY) {
-		buf[3] = bin2bcd(tm->tm_wday) & DS3231_BITS_TIME_DAY_OF_WEEK;
+		buf[3] = bin2bcd(tm->tm_wday + 1) & DS3231_BITS_TIME_DAY_OF_WEEK;
 		buf[3] |= DS3231_BITS_ALARM_DATE_W_OR_M;
 	} else if (mask & RTC_ALARM_TIME_MASK_MONTHDAY) {
 		buf[3] = bin2bcd(tm->tm_mday) & DS3231_BITS_TIME_DATE;
@@ -529,7 +529,7 @@ static int rtc_ds3231_alarm_buf_to_rtc_time(uint8_t *buf, int id, struct rtc_tim
 	}
 	if (!(buf[3] & DS3231_BITS_ALARM_RATE)) {
 		if (buf[3] & DS3231_BITS_ALARM_DATE_W_OR_M) {
-			tm->tm_wday = bcd2bin(buf[3] & DS3231_BITS_TIME_DAY_OF_WEEK);
+			tm->tm_wday = bcd2bin(buf[3] & DS3231_BITS_TIME_DAY_OF_WEEK) - 1;
 			*mask |= RTC_ALARM_TIME_MASK_WEEKDAY;
 		} else {
 			tm->tm_mday = bcd2bin(buf[3] & DS3231_BITS_TIME_DATE);
