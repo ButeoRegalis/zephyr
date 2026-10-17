@@ -148,7 +148,10 @@ JSON-LD format:
 
 For SPDX 3.0, every document declares conformance to the Core, Software and Simple Licensing
 profiles, and :file:`build.jsonld` additionally declares the :ref:`Build profile
-<west-spdx-build-profile>` that captures how the artifacts were produced.
+<west-spdx-build-profile>` that captures how the artifacts were produced. Element IDs are full
+IRIs under the namespace prefix (``-n``), so the documents of separate builds, such as the images
+of a :ref:`sysbuild <sysbuild>` build, can be combined into one graph as long as each build has its
+own prefix, which the default prefix guarantees.
 
 Every file in the bill-of-materials is scanned so that its hashes (SHA512, SHA256 and SHA1) can be
 recorded, together with its license and copyright.
@@ -166,6 +169,30 @@ What is found is written out as ``LicenseInfoInFile``, ``LicenseConcluded`` and
 .. note::
    Copyright extraction uses heuristics that may not capture complete notice text, so
    ``FileCopyrightText`` content is best-effort. This aligns with SPDX specification recommendations.
+
+Package identification
+----------------------
+
+Every package records where it came from, so that the SBOM can be matched against vulnerability
+databases:
+
+- a **PURL** (Package URL) built from the repository the sources were checked out from, pinned to
+  the release tag when the checked-out revision is tagged and to the revision itself otherwise. It
+  identifies the exact tree that was built, which for a fork is the fork's own repository.
+
+- a **CPE** (Common Platform Enumeration) name, which identifies the product and version rather
+  than the checkout, and so does not depend on which remote the sources came from.
+
+For Zephyr itself, the CPE is ``cpe:2.3:o:zephyrproject:zephyr:<version>:<update>:*:*:*:*:*:*``,
+built from the version reported by Zephyr's :zephyr_file:`VERSION` file. Any ``EXTRAVERSION``
+becomes the CPE ``update`` field, so a release candidate is recorded as
+``cpe:2.3:o:zephyrproject:zephyr:4.4.0:rc3:*:*:*:*:*:*`` and a final release as
+``cpe:2.3:o:zephyrproject:zephyr:4.4.0:-:*:*:*:*:*:*``. Both the ``zephyr`` source package and the
+Zephyr entry in ``modules-deps`` carry it.
+
+Modules are identified the same way, and can additionally declare curated references (for instance
+the upstream project's CPE, when the module is a fork) in their :file:`zephyr/module.yml`. See
+:ref:`modules <modules-vulnerability-monitoring>`.
 
 Relationships
 -------------

@@ -604,7 +604,7 @@ static int process_queue(struct bt_att_chan *chan, struct k_fifo *queue)
 		err = bt_att_chan_send(chan, buf);
 		if (err) {
 			/* Push it back if it could not be send */
-			k_queue_prepend(&queue->_queue, buf);
+			k_queue_prepend(&queue->_queue, net_buf_take(&buf));
 			return err;
 		}
 
@@ -894,7 +894,7 @@ static void bt_att_chan_send_rsp(struct bt_att_chan *chan, struct net_buf *buf)
 	err = chan_send(chan, buf);
 	if (err) {
 		/* Responses need to be sent back using the same channel */
-		k_fifo_put(&chan->tx_queue, buf);
+		k_fifo_put(&chan->tx_queue, net_buf_take(&buf));
 	}
 }
 
@@ -2327,7 +2327,7 @@ static uint8_t att_prep_write_rsp(struct bt_att_chan *chan, uint16_t handle,
 	LOG_DBG("buf %p handle 0x%04x offset %u", data.buf, handle, offset);
 
 	/* Store buffer in the outstanding queue */
-	net_buf_slist_put(&chan->att->prep_queue, data.buf);
+	net_buf_slist_put(&chan->att->prep_queue, net_buf_take(&data.buf));
 
 	/* Generate response */
 	data.buf = att_create_rsp_pdu(chan, BT_ATT_OP_PREPARE_WRITE_RSP);
@@ -2414,10 +2414,28 @@ static uint8_t exec_write_reassemble(uint16_t handle, uint16_t offset,
 	return BT_ATT_ERR_SUCCESS;
 }
 
+static void att_prep_queue_clear(struct bt_att *att)
+{
+	struct net_buf *buf;
+
+	buf = net_buf_slist_get(&att->prep_queue);
+	while (buf != NULL) {
+		net_buf_unref(buf);
+		buf = net_buf_slist_get(&att->prep_queue);
+	}
+}
+
 static uint8_t att_exec_write_rsp(struct bt_att_chan *chan, uint8_t flags)
 {
 	struct net_buf *buf;
-	uint8_t err = 0U;
+
+	if (flags != BT_ATT_FLAG_EXEC) {
+		/* Core v6.3 Vol 3 Part F 3.4.6.3: the prepared values are
+		 * discarded, the queue is cleared and the response is sent.
+		 */
+		att_prep_queue_clear(chan->att);
+		goto rsp;
+	}
 
 	/* The following code will iterate on all prepare writes in the
 	 * prep_queue, and reassemble those that share the same handle.
@@ -2427,6 +2445,7 @@ static uint8_t att_exec_write_rsp(struct bt_att_chan *chan, uint8_t flags)
 	while (!sys_slist_is_empty(&chan->att->prep_queue)) {
 		struct bt_attr_data *data;
 		uint16_t handle;
+		uint8_t err;
 
 		NET_BUF_SIMPLE_DEFINE_STATIC(reassembled_data,
 					     MIN(BT_ATT_MAX_ATTRIBUTE_LEN,
@@ -2446,33 +2465,27 @@ static uint8_t att_exec_write_rsp(struct bt_att_chan *chan, uint8_t flags)
 					    &reassembled_data);
 		if (err != BT_ATT_ERR_SUCCESS) {
 			/* Discard queued buffers */
-			do {
-				net_buf_unref(buf);
-				buf = net_buf_slist_get(&chan->att->prep_queue);
-			} while (buf != NULL);
+			net_buf_unref(buf);
+			att_prep_queue_clear(chan->att);
 			send_err_rsp(chan, BT_ATT_OP_EXEC_WRITE_REQ,
 				     handle, err);
 			return 0;
 		}
 
-		/* Just discard the data if an error was set */
-		if (!err && flags == BT_ATT_FLAG_EXEC) {
-			err = perform_write(chan, BT_ATT_OP_EXEC_WRITE_REQ, handle, data->offset,
-					    reassembled_data.data, reassembled_data.len);
-			if (err) {
-				/* Respond here since handle is set */
-				send_err_rsp(chan, BT_ATT_OP_EXEC_WRITE_REQ,
-					     data->handle, err);
-			}
-		}
-
+		err = perform_write(chan, BT_ATT_OP_EXEC_WRITE_REQ, handle, data->offset,
+				    reassembled_data.data, reassembled_data.len);
 		net_buf_unref(buf);
+		if (err != BT_ATT_ERR_SUCCESS) {
+			/* Core v6.3 Vol 3 Part F 3.4.6.3: the queue is cleared
+			 * and only an Error Response is sent.
+			 */
+			att_prep_queue_clear(chan->att);
+			send_err_rsp(chan, BT_ATT_OP_EXEC_WRITE_REQ, handle, err);
+			return 0;
+		}
 	}
 
-	if (err) {
-		return 0;
-	}
-
+rsp:
 	/* Generate response */
 	buf = att_create_rsp_pdu(chan, BT_ATT_OP_EXEC_WRITE_RSP);
 	if (!buf) {
@@ -3157,9 +3170,7 @@ static void att_reset(struct bt_att *att)
 
 #if CONFIG_BT_ATT_PREPARE_COUNT > 0
 	/* Discard queued buffers */
-	while ((buf = net_buf_slist_get(&att->prep_queue))) {
-		net_buf_unref(buf);
-	}
+	att_prep_queue_clear(att);
 #endif /* CONFIG_BT_ATT_PREPARE_COUNT > 0 */
 
 #if defined(CONFIG_BT_EATT)
@@ -4116,7 +4127,7 @@ int bt_att_send(struct bt_conn *conn, struct net_buf *buf)
 		return -ENOTCONN;
 	}
 
-	k_fifo_put(&att->tx_queue, buf);
+	k_fifo_put(&att->tx_queue, net_buf_take(&buf));
 	att_send_process(att);
 
 	return 0;

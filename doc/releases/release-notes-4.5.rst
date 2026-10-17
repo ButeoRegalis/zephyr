@@ -516,6 +516,13 @@ Deprecated APIs and options
     model v2. Both the old Kconfig symbols and the ``soc.yml`` entries will be removed
     in a future release. All in-tree boards have been migrated.
 
+* RTIO
+
+  * The ``RTIO_SQE_CANCELED`` flag has been deprecated. Cancellation state moved into the
+    atomic status word of :c:struct:`rtio_iodev_sqe`; check it with
+    :c:func:`rtio_iodev_sqe_is_canceled`. See the :ref:`migration guide <migration_4.5>`
+    for details.
+
 * Ring buffer
 
   * The ring buffer item API (:c:func:`ring_buf_item_init`, :c:func:`ring_buf_item_put`,
@@ -744,6 +751,13 @@ New APIs and options
     * :c:func:`clock_control_release`
     * :c:func:`clock_control_cancel_or_release`
 
+* Counter
+
+  * :kconfig:option:`CONFIG_COUNTER_CAPTURE`, :c:struct:`counter_capture_dt_spec`,
+    :c:func:`counter_capture_configure`, :c:func:`counter_capture_configure_64`,
+    :c:func:`counter_enable_capture` and :c:func:`counter_disable_capture`, with
+    devicetree helpers for configuring input capture (:github:`89127`, :github:`108713`).
+
 * CPUFreq
 
   * :kconfig:option:`CONFIG_CPU_FREQ_POLICY_TIMING_NOISE`
@@ -754,6 +768,12 @@ New APIs and options
   * :c:enumerator:`CRYPTO_CIPHER_MODE_OFB`
   * :c:func:`cipher_cfb_op`
   * :c:func:`cipher_ofb_op`
+  * :c:enumerator:`CRYPTO_HASH_ALGO_SHA3_224`, :c:enumerator:`CRYPTO_HASH_ALGO_SHA3_256`,
+    :c:enumerator:`CRYPTO_HASH_ALGO_SHA3_384` and :c:enumerator:`CRYPTO_HASH_ALGO_SHA3_512`
+    (:github:`118321`).
+  * :kconfig:option:`CONFIG_USE_STM32_HAL_PSA_CRYPTO_DRIVERS` for experimental
+    hardware-accelerated PSA Crypto using STM32 AES, CRYP, SAES and HASH peripherals
+    (:github:`119888`).
 
 * Debug
 
@@ -895,6 +915,9 @@ New APIs and options
 * Multimedia Pipeline
 
   * :kconfig:option:`CONFIG_MPIPE` (see :ref:`mpipe`)
+  * :kconfig:option:`CONFIG_MPIPE_BASE`
+  * :kconfig:option:`CONFIG_MPIPE_DUMP`
+  * :kconfig:option:`CONFIG_MPIPE_PLAYER`
 
 * Network
 
@@ -1214,7 +1237,7 @@ New Boards
   * :zephyr:board:`cy8cproto_040t` (``cy8cproto_040t``)
   * :zephyr:board:`cy8cproto_040t_auto` (``cy8cproto_040t_auto``)
   * :zephyr:board:`kit_psc3m5_cc2` (``kit_psc3m5_cc2``)
-  * :zephyr:board:`kit_psc3m6_evk` (``kit_psc3m6_evk``)
+  * :zephyr:board:`kit_psc3m6_eval` (``kit_psc3m6_eval``)
   * :zephyr:board:`kit_t2g_c2d6m_lite` (``kit_t2g_c2d6m_lite``)
 
 * Intel Corporation
@@ -2555,6 +2578,9 @@ Libraries / Subsystems
     both native and offloaded ports. mDNS probe port selection and DNS-SD
     service checks use this new function.
 
+  * Added IEEE 802.3 transport support to PTP, packet-socket receive timestamping,
+    and PTP shell diagnostics (:github:`106464`).
+
 * Management
 
   * MCUmgr
@@ -2562,6 +2588,20 @@ Libraries / Subsystems
     * The image management client now supports SHA-512 image digests. It can
       list and select images for testing or confirmation on targets built with
       :kconfig:option:`CONFIG_MCUBOOT_BOOTLOADER_USES_SHA512`.
+
+* Multimedia Pipeline
+
+  * Introducing :ref:`mpipe`, an experimental subsystem for building multimedia
+    applications out of reusable elements - sources, transforms and sinks -
+    linked together into a pipeline. It lets an application describe the media
+    flow it wants instead of driving each audio, video or display device itself.
+
+  * The base plugin adds the media-agnostic elements: a caps filter, a tee, a
+    queue, and an application source and sink.
+
+  * A topology dump renders a pipeline as a Graphviz graph, and a player drives
+    a pipeline from a worker thread and the shell.
+
 * Networking
 
   * CoAP
@@ -2601,13 +2641,6 @@ Libraries / Subsystems
 
   * ``psa_its_get()`` called with a ``data_size`` of 0 now reports whether the entry exists
     and is valid instead of always returning ``PSA_SUCCESS``.
-
-* Multimedia Pipeline
-
-  * Introducing :ref:`mpipe`, a new subsystem for building multimedia
-    applications out of reusable elements - sources, transforms and sinks -
-    linked together into a pipeline. It lets an application describe the media
-    flow it wants instead of driving each audio, video or display device itself.
 
 * Precision timing
 
@@ -2699,6 +2732,11 @@ Other notable changes
     are available for CI use; and out-of-tree databases can be layered with
     ``-DHARDENCONFIG_EXTRA_SOURCES=``. The database is validated in CI against the actual Kconfig
     tree so entries can no longer go stale.
+
+* CRC
+
+  * Added CRC-32/MPEG-2 support (:c:func:`crc32_mpeg2` / ``crc32_mpeg2_update``) to the
+    software CRC subsystem, the CRC driver API and the NXP CRC drivers.
 
 * Kernel
 
@@ -2826,6 +2864,10 @@ Other notable changes
     ``imxrt7xx/``, ``imxrt118x/``).
     See the :ref:`migration guide <migration_4.5>` for how to update
     out-of-tree board includes.
+
+  * Added counter reset API support to the NXP MCUX CTimer, GPT and LPTimer drivers.
+
+  * Added a HWInfo reset-cause driver for the NXP LPC55xx Power Management Controller (PMC).
 
 * Arm
 

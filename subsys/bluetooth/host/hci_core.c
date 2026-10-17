@@ -125,6 +125,11 @@ static K_WORK_DEFINE(rx_work, rx_work_handler);
 static struct k_work_q bt_workq;
 static K_KERNEL_STACK_DEFINE(rx_thread_stack, CONFIG_BT_RX_STACK_SIZE);
 
+bool bt_is_work_thread(void)
+{
+	return k_current_get() == bt_workq.thread_id;
+}
+
 int bt_work_submit(struct k_work *work)
 {
 	return k_work_submit_to_queue(&bt_workq, work);
@@ -424,6 +429,29 @@ static void hci_cmd_queue_purge(void)
 
 		net_buf_unref(buf);
 	}
+}
+
+/* Complete the command that was on its way to the controller when the HCI
+ * transport was closed. Its response cannot arrive any more, and its sender
+ * would otherwise wait for the command timeout.
+ */
+static void hci_cmd_sent_purge(void)
+{
+	struct net_buf *buf;
+
+	buf = net_buf_take(&bt_dev.sent_cmd);
+	if (buf == NULL) {
+		return;
+	}
+
+	LOG_WRN("Dropping sent command 0x%04x: HCI transport closed", cmd(buf)->opcode);
+
+	if (cmd(buf)->sync != NULL) {
+		cmd(buf)->status = BT_HCI_ERR_UNSPECIFIED;
+		k_sem_give(cmd(buf)->sync);
+	}
+
+	net_buf_unref(buf);
 }
 
 int bt_hci_cmd_send(uint16_t opcode, struct net_buf *buf)
@@ -2776,7 +2804,18 @@ static void hci_cmd_done(uint16_t opcode, uint8_t status, struct net_buf *evt_bu
 	 */
 	if (evt_buf != buf) {
 		net_buf_reset(buf);
-		net_buf_add_mem(buf, evt_buf->data, evt_buf->len);
+
+		if (evt_buf->len > net_buf_tailroom(buf)) {
+			/* The command buffer holds a response of the size that
+			 * CONFIG_BT_BUF_EVT_RX_SIZE allows. A longer one cannot
+			 * be handed over, so the command fails.
+			 */
+			LOG_ERR("Response to opcode 0x%04x too long (%u bytes)", opcode,
+				evt_buf->len);
+			status = BT_HCI_ERR_UNSPECIFIED;
+		} else {
+			net_buf_add_mem(buf, evt_buf->data, evt_buf->len);
+		}
 	}
 
 	if (cmd(buf)->state && !status) {
@@ -4717,7 +4756,7 @@ static void rx_queue_put(struct net_buf *buf)
 		return;
 	}
 
-	net_buf_slist_put(&bt_dev.rx_queue, buf);
+	net_buf_slist_put(&bt_dev.rx_queue, net_buf_take(&buf));
 
 	const int err = bt_work_submit(&rx_work);
 
@@ -5082,8 +5121,15 @@ int bt_disable(void)
 	/* Clear BT_DEV_READY before disabling HCI link. It is not set if
 	 * bt_enable() failed after opening the transport, in which case a
 	 * failed disable must not set it either.
+	 *
+	 * The TX processor holds the host lock for a whole pass, so with the
+	 * lock held here no pass is under way in another thread when the
+	 * flag changes: what a pass has picked up has been sent, and every
+	 * later one holds back what is queued for the connections.
 	 */
+	bt_dev_lock();
 	was_ready = atomic_test_and_clear_bit(bt_dev.flags, BT_DEV_READY);
+	bt_dev_unlock();
 
 #if defined(CONFIG_BT_BROADCASTER)
 	bt_adv_reset_adv_pool();
@@ -5112,7 +5158,7 @@ int bt_disable(void)
 		buf = net_buf_slist_get(&bt_dev.rx_queue);
 	}
 
-	if (k_current_get() == bt_workq.thread_id) {
+	if (bt_is_work_thread()) {
 		(void)k_work_cancel(&rx_work);
 	} else {
 		struct k_work_sync sync;
@@ -5128,6 +5174,8 @@ int bt_disable(void)
 			LOG_ERR("Failed to reset BLE controller");
 			if (was_ready) {
 				atomic_set_bit(bt_dev.flags, BT_DEV_READY);
+				/* Resume sending the data that was held back */
+				bt_tx_irq_raise();
 			}
 			atomic_clear_bit(bt_dev.flags, BT_DEV_DISABLING);
 			return err;
@@ -5173,6 +5221,8 @@ int bt_disable(void)
 		atomic_clear_bit(bt_dev.flags, BT_DEV_DISABLING);
 		return err;
 	}
+
+	hci_cmd_sent_purge();
 
 	/* Some functions rely on checking this bitfield */
 	memset(bt_dev.supported_commands, 0x00, sizeof(bt_dev.supported_commands));
